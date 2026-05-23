@@ -6,6 +6,7 @@
     actionDelayMs: 650,
     cycleDelayMs: 1200,
     waitTimeoutMs: 3500,
+    menuAnchorMaxDistancePx: 650,
     maxIdleCycles: 10,
     maxAttemptsPerPost: 2,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
@@ -238,30 +239,73 @@
   }
 
   function findPostCaret(post) {
-    const caret = post.querySelector('button[data-testid="caret"]');
+    const caret = post.querySelector('button[data-testid="caret"][aria-label="More"], button[data-testid="caret"]');
     if (!isElementVisible(caret)) return null;
     if (getPostRoot(caret) !== post) return null;
     return caret;
+  }
+
+  function distanceBetweenRects(a, b) {
+    const ax = a.left + a.width / 2;
+    const ay = a.top + a.height / 2;
+    const bx = b.left + b.width / 2;
+    const by = b.top + b.height / 2;
+    return Math.hypot(ax - bx, ay - by);
+  }
+
+  function isMenuAnchoredToCaret(menu, caret) {
+    if (!menu || !caret) return false;
+    const menuRect = menu.getBoundingClientRect();
+    const caretRect = caret.getBoundingClientRect();
+    return distanceBetweenRects(menuRect, caretRect) <= CONFIG.menuAnchorMaxDistancePx
+      && menuRect.left <= caretRect.right + 420
+      && menuRect.right >= caretRect.left - 420
+      && menuRect.top <= caretRect.bottom + 520
+      && menuRect.bottom >= caretRect.top - 120;
   }
 
   function getVisibleMenus() {
     return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
   }
 
-  function getVisibleDeleteMenuItem() {
-    const menuItems = [...document.querySelectorAll('[role="menu"] [role="menuitem"], [data-testid="Dropdown"] [role="menuitem"]')];
-    return menuItems.find((item) => isElementVisible(item) && /^Delete$/i.test(normalizeText(item.innerText || item.textContent))) || null;
+  function getAnchoredDeleteMenuItem(caret) {
+    const menus = getVisibleMenus().filter((menu) => isMenuAnchoredToCaret(menu, caret));
+    if (menus.length !== 1) return null;
+
+    const menu = menus[0];
+    const menuText = normalizeText(menu.innerText || '');
+    if (isSecurityOrAccountText(menuText)) return null;
+    if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(menuText)) return null;
+
+    const menuItems = [...menu.querySelectorAll('[role="menuitem"]')].filter(isElementVisible);
+    const firstItem = menuItems[0] || null;
+    if (!firstItem) return null;
+
+    const firstText = normalizeText(firstItem.innerText || firstItem.textContent);
+    if (!/^Delete$/i.test(firstText)) return null;
+
+    return firstItem;
   }
 
   function getVisibleDeleteConfirmDialog() {
     const dialogs = getVisibleDialogs();
-    return dialogs.find((dialog) => /delete/i.test(normalizeText(dialog.innerText))) || null;
+    return dialogs.find((dialog) => {
+      const text = normalizeText(dialog.innerText || '');
+      if (!/delete/i.test(text)) return false;
+      if (isSecurityOrAccountText(text)) return false;
+      if (/delete\s+(account|profile|message|conversation|chat|list|bookmark|draft|all)/i.test(text)) return false;
+      return /(delete\s+post|delete\s+tweet|this can[’']?t be undone|this cannot be undone)/i.test(text);
+    }) || null;
   }
 
   function getVisibleDeleteConfirmButton(dialog) {
     if (!dialog) return null;
     const buttons = [...dialog.querySelectorAll('button, [role="button"]')];
-    return buttons.find((button) => isElementVisible(button) && /^Delete$/i.test(normalizeText(button.innerText || button.textContent))) || null;
+    return buttons.find((button) => {
+      if (!isElementVisible(button)) return false;
+      const text = normalizeText(button.innerText || button.textContent || button.getAttribute('aria-label'));
+      return /^Delete$/i.test(text) && !isSecurityOrAccountText(text);
+    }) || null;
   }
 
   async function waitFor(predicate, stepName) {
@@ -334,7 +378,7 @@
 
     const deleteMenuItem = await waitFor(() => {
       if (abortIfSecurityOrUnexpectedDialog()) return null;
-      return getVisibleDeleteMenuItem();
+      return getAnchoredDeleteMenuItem(caret);
     }, `step 2 delete menu item for ${ownStatus.tweetId}`);
     if (!deleteMenuItem || !state.running) return false;
 
