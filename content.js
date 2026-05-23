@@ -85,6 +85,35 @@
     return /passcode|verification|verify your identity|authenticate|security|two[-\s]?factor|\b2fa\b|account access|suspicious activity|confirm your identity|checkpoint|unlock your account|log in|login|password|email code|phone number|confirmation code/i.test(text || '');
   }
 
+  function isPasscodeChatOrSecurityContext(element) {
+    const blockedTextPattern = /passcode|recover your encryption keys|decrypt your previous messages|forgot passcode|encrypted|encryption keys|chat|message|conversation|pin\/recovery|verification|verify your identity|authenticate|security|two[-\s]?factor|\b2fa\b|checkpoint|unlock your account|log in|login|password|confirmation code/i;
+
+    if (blockedTextPattern.test(window.location.pathname)) return true;
+    if (element) {
+      const context = element.closest('[role="dialog"], [role="menu"], [data-testid="Dropdown"], [data-testid="primaryColumn"], article, [data-testid="tweet"]') || element;
+      const contextText = normalizeText(context.innerText || context.textContent || '');
+      if (blockedTextPattern.test(contextText)) return true;
+    }
+
+    const visiblePageText = normalizeText(document.body?.innerText || '').slice(0, 5000);
+    return /enter passcode|recover your encryption keys|decrypt your previous messages|forgot passcode/i.test(visiblePageText);
+  }
+
+  function isVerifiedAuthorHandle(post, expectedHandle) {
+    const handleText = `@${expectedHandle.toLowerCase()}`;
+    const userNameLinks = [...post.querySelectorAll('a[role="link"][href], a[href]')].slice(0, 12);
+    return userNameLinks.some((link) => {
+      try {
+        const url = new URL(link.href, window.location.origin);
+        const pathHandle = url.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+        const text = normalizeText(link.innerText || link.textContent || '').toLowerCase();
+        return pathHandle === expectedHandle.toLowerCase() && text.includes(handleText);
+      } catch (_) {
+        return false;
+      }
+    });
+  }
+
   function isBlockedPath(pathname = window.location.pathname) {
     const path = pathname.toLowerCase();
     return /(^|\/)(i\/chat|messages|settings|account|login|flow|security|checkpoint|passcode|logout|oauth|privacy|help|pin|recovery|compose|search|hashtag)(\/|$)/i.test(path);
@@ -198,7 +227,7 @@
         const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
         if (!match) continue;
         const [, handle, tweetId] = match;
-        if (handle.toLowerCase() === targetHandle) return { handle, tweetId, url };
+        if (handle.toLowerCase() === targetHandle && isVerifiedAuthorHandle(post, targetHandle)) return { handle, tweetId, url };
       } catch (_) {
         // Ignore malformed links.
       }
@@ -327,17 +356,32 @@
 
   // CLICK CALLSITE 1 OF 3: the target post article's own More/caret button only.
   function clickPostCaret(caret) {
+    if (isPasscodeChatOrSecurityContext(caret)) {
+      abortRun('Aborted: refused to click post caret because passcode/chat/security text was visible nearby.');
+      return false;
+    }
     caret.click();
+    return true;
   }
 
   // CLICK CALLSITE 2 OF 3: the Delete menu item opened by that caret only.
   function clickDeleteMenuItem(deleteMenuItem) {
+    if (isPasscodeChatOrSecurityContext(deleteMenuItem)) {
+      abortRun('Aborted: refused to click Delete because passcode/chat/security text was visible nearby.');
+      return false;
+    }
     deleteMenuItem.click();
+    return true;
   }
 
   // CLICK CALLSITE 3 OF 3: the Delete button in X's delete confirmation dialog only.
   function clickConfirmDeleteButton(confirmButton) {
+    if (isPasscodeChatOrSecurityContext(confirmButton)) {
+      abortRun('Aborted: refused to confirm Delete because passcode/chat/security text was visible nearby.');
+      return false;
+    }
     confirmButton.click();
+    return true;
   }
 
   async function deletePost(post) {
@@ -374,7 +418,7 @@
     postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
     await sleep(150);
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
-    clickPostCaret(caret);
+    if (!clickPostCaret(caret)) return false;
 
     const deleteMenuItem = await waitFor(() => {
       if (abortIfSecurityOrUnexpectedDialog()) return null;
@@ -383,7 +427,7 @@
     if (!deleteMenuItem || !state.running) return false;
 
     setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
-    clickDeleteMenuItem(deleteMenuItem);
+    if (!clickDeleteMenuItem(deleteMenuItem)) return false;
 
     const dialog = await waitFor(() => {
       const confirmDialog = getVisibleDeleteConfirmDialog();
@@ -403,7 +447,7 @@
     }
 
     setStatus(`Step 3/3: confirming Delete for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
-    clickConfirmDeleteButton(confirmButton);
+    if (!clickConfirmDeleteButton(confirmButton)) return false;
 
     await sleep(CONFIG.actionDelayMs * 2);
     state.deleted += 1;
@@ -416,6 +460,11 @@
   }
 
   function scrollTimelineForward() {
+    if (isPasscodeChatOrSecurityContext(document.body)) {
+      abortRun('Aborted: passcode/chat/security text visible before scroll. Run flag removed.');
+      return;
+    }
+
     const nextTop = Math.min(
       getScrollTop() + CONFIG.scrollStep,
       Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
