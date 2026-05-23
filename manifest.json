@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TweetRemover",
-  "version": "1.0",
+  "version": "1.0.1",
   "description": "Let's you delete your tweets on Twitter/X",
   "icons": {
     "16": "icon16.png",
@@ -23,8 +23,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://x.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://x.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_end"
     }
   ]
