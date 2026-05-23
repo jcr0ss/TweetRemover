@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TweetRemover",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "Let's you delete your tweets on Twitter/X",
   "icons": {
     "16": "icon16.png",
@@ -9,7 +9,8 @@
     "128": "icon128.png"
   },
   "permissions": [
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
     "https://x.com/*"

@@ -8,6 +8,8 @@
     maxIdleCycles: 10,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
     menuAnchorMaxDistancePx: 650,
+    deleteTweetQueryId: 'nxpZCY2K-I6QoFHAHeojFQ',
+    twitterBearerToken: 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
   };
 
   const state = {
@@ -15,7 +17,7 @@
     deleted: 0,
     skipped: 0,
     idleCycles: 0,
-    seenPosts: new WeakSet(),
+    attemptedPosts: new WeakMap(),
     stopReason: '',
   };
 
@@ -136,6 +138,73 @@
     }) || null;
   }
 
+  function getTargetHandle() {
+    const parts = window.location.pathname.split('/').filter(Boolean);
+    return (parts[0] || '').replace(/^@+/, '').toLowerCase();
+  }
+
+  function getOwnPostStatus(post) {
+    const targetHandle = getTargetHandle();
+    const links = [...post.querySelectorAll('a[href*="/status/"]')];
+
+    for (const link of links) {
+      try {
+        const url = new URL(link.href, window.location.origin);
+        const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+        if (!match) continue;
+        const [, handle, tweetId] = match;
+        if (handle.toLowerCase() === targetHandle) return { handle, tweetId, url };
+      } catch (_) {
+        // Ignore malformed links.
+      }
+    }
+
+    return null;
+  }
+
+  function getCookieValue(name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  async function deleteTweetByApi(tweetId) {
+    const csrfToken = getCookieValue('ct0');
+    if (!csrfToken) throw new Error('missing ct0 csrf cookie');
+
+    const response = await fetch(`/i/api/graphql/${CONFIG.deleteTweetQueryId}/DeleteTweet`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        authorization: `Bearer ${CONFIG.twitterBearerToken}`,
+        'content-type': 'application/json',
+        'x-csrf-token': csrfToken,
+        'x-twitter-active-user': 'yes',
+        'x-twitter-auth-type': 'OAuth2Session',
+        'x-twitter-client-language': 'en',
+      },
+      body: JSON.stringify({
+        variables: { tweet_id: tweetId, dark_request: false },
+        queryId: CONFIG.deleteTweetQueryId,
+      }),
+    });
+
+    const text = await response.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch (_) {}
+
+    if (!response.ok) {
+      const message = payload?.errors?.[0]?.message || text || `HTTP ${response.status}`;
+      throw new Error(message);
+    }
+
+    if (payload?.errors?.length) {
+      throw new Error(payload.errors.map((error) => error.message || error.code || 'unknown error').join('; '));
+    }
+
+    return payload;
+  }
+
   function getPostRoot(element) {
     const candidate = element?.closest('[data-testid="tweet"], article[role="article"], article');
     if (!candidate || !isInsidePrimaryColumn(candidate)) return null;
@@ -174,7 +243,7 @@
   }
 
   function getOpenMenus() {
-    return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')]
+    return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"], [data-testid="DropdownMenu"]')]
       .filter((menu) => isElementVisible(menu) && !isSecurityOrAccountText(menu.innerText));
   }
 
@@ -244,6 +313,16 @@
     return true;
   }
 
+  function trustedEnoughClick(element) {
+    if (!(element instanceof HTMLElement)) return;
+    element.focus?.();
+    element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window }));
+    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, composed: true, button: 0, buttons: 1, view: window }));
+    element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, composed: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 0, view: window }));
+    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, composed: true, button: 0, buttons: 0, view: window }));
+    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, button: 0, buttons: 0, view: window }));
+  }
+
   async function dismissOpenMenuOrDialog() {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     await sleep(100);
@@ -255,8 +334,9 @@
   }
 
   async function deletePost(post) {
-    if (state.seenPosts.has(post)) return false;
-    state.seenPosts.add(post);
+    const attempts = state.attemptedPosts.get(post) || 0;
+    if (attempts >= 2) return false;
+    state.attemptedPosts.set(post, attempts + 1);
 
     if (shouldAbortForOutOfScopePage()) return false;
 
@@ -266,61 +346,31 @@
       return false;
     }
 
-    const menuButton = getPostMenuButton(postRoot);
-    if (!menuButton) {
-      skip('post menu button not found');
+    const ownStatus = getOwnPostStatus(postRoot);
+    if (!ownStatus?.tweetId) {
+      skip('post does not belong to the requested profile handle');
       return false;
     }
 
-    menuButton.scrollIntoView({ block: 'center', inline: 'nearest' });
-    await sleep(CONFIG.actionDelayMs);
-
-    if (shouldAbortForOutOfScopePage()) return false;
-    if (getPostRoot(menuButton) !== postRoot) {
-      skip('post menu button moved out of verified post');
+    if (getBlockingSecurityDialog()) {
+      await dismissSecurityPromptIfPresent();
       return false;
     }
 
-    const menusBeforeClick = new Set(getOpenMenus());
-    menuButton.click();
-    await sleep(CONFIG.actionDelayMs);
-
-    if (shouldAbortForOutOfScopePage()) return false;
-    if (await dismissSecurityPromptIfPresent()) return false;
-
-    const menu = getMenuAnchoredToButton(menuButton, menusBeforeClick);
-    const deleteItem = getMenuDeleteItemForPost(menu, menuButton);
-    if (!deleteItem) {
-      skip('no anchored post Delete menu item');
-      await dismissOpenMenuOrDialog();
+    try {
+      setStatus(`Deleting verified post ${ownStatus.tweetId} via X post-delete API.
+Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
+      await deleteTweetByApi(ownStatus.tweetId);
+      state.deleted += 1;
+      postRoot.remove();
+      setStatus(`Deleted verified post ${ownStatus.tweetId}.
+Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
+      await sleep(CONFIG.actionDelayMs * 2);
+      return true;
+    } catch (error) {
+      skip(`API delete failed for ${ownStatus.tweetId}: ${error?.message || error}`);
       return false;
     }
-
-    deleteItem.click();
-    await sleep(CONFIG.actionDelayMs);
-
-    if (shouldAbortForOutOfScopePage()) return false;
-    if (await dismissSecurityPromptIfPresent()) return false;
-
-    const dialog = getPostDeleteConfirmationDialog();
-    if (!dialog) {
-      skip('no safe post delete confirmation dialog');
-      await dismissOpenMenuOrDialog();
-      return false;
-    }
-
-    const confirmButton = getConfirmationButton(dialog);
-    if (!confirmButton) {
-      skip('delete confirmation button not verified');
-      await dismissOpenMenuOrDialog();
-      return false;
-    }
-
-    confirmButton.click();
-    state.deleted += 1;
-    setStatus(`Deleted a verified post.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
-    await sleep(CONFIG.actionDelayMs * 2);
-    return true;
   }
 
   function getScrollTop() {
