@@ -7,7 +7,6 @@
     cycleDelayMs: 1200,
     maxIdleCycles: 10,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
-    menuAnchorMaxDistancePx: 650,
     deleteTweetQueryId: 'nxpZCY2K-I6QoFHAHeojFQ',
     twitterBearerToken: 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
   };
@@ -23,9 +22,25 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  function hasRunParam() {
+    return new URLSearchParams(window.location.search).get(CONFIG.queryParam) === 'true';
+  }
+
   function shouldRun() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get(CONFIG.queryParam) === 'true';
+    return hasRunParam();
+  }
+
+  function stripRunParam() {
+    if (!hasRunParam()) return;
+
+    const url = new URL(window.location.href);
+    url.searchParams.delete(CONFIG.queryParam);
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    try {
+      window.history.replaceState(window.history.state, document.title, next);
+    } catch (_) {
+      // Best-effort only; never navigate or click to recover.
+    }
   }
 
   function createStatusBox() {
@@ -75,7 +90,7 @@
 
   function isBlockedPath(pathname = window.location.pathname) {
     const path = pathname.toLowerCase();
-    return /(^|\/)(i\/chat|messages|settings|account|login|flow|security|checkpoint|passcode|logout|oauth|privacy|help)(\/|$)/i.test(path);
+    return /(^|\/)(i\/chat|messages|settings|account|login|flow|security|checkpoint|passcode|logout|oauth|privacy|help|pin|recovery)(\/|$)/i.test(path);
   }
 
   function isAllowedRunSurface() {
@@ -100,26 +115,39 @@
 
   function shouldAbortForOutOfScopePage() {
     if (isAllowedRunSurface()) return false;
-    state.stopReason = `Aborted: out-of-scope page ${window.location.pathname}.`;
+    stripRunParam();
+    state.stopReason = `Aborted: out-of-scope page ${window.location.pathname}. Run flag removed; no UI recovery attempted.`;
     setStatus(`${state.stopReason}\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
     state.running = false;
     return true;
   }
 
+  function installRouteWatchdog() {
+    const abortIfUnsafe = () => {
+      if (!state.running && !hasRunParam()) return;
+      if (!isAllowedRunSurface()) shouldAbortForOutOfScopePage();
+    };
+
+    for (const method of ['pushState', 'replaceState']) {
+      const original = window.history[method];
+      window.history[method] = function patchedHistoryMethod(...args) {
+        const result = original.apply(this, args);
+        queueMicrotask(abortIfUnsafe);
+        return result;
+      };
+    }
+
+    window.addEventListener('popstate', abortIfUnsafe);
+    window.addEventListener('hashchange', abortIfUnsafe);
+
+    const observer = new MutationObserver(abortIfUnsafe);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    abortIfUnsafe();
+  }
+
   function getBlockingSecurityDialog() {
     const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')];
     return dialogs.find((dialog) => isElementVisible(dialog) && isSecurityOrAccountText(dialog.innerText));
-  }
-
-  function closeOutOfScopeDialog(dialog) {
-    const closeButton = dialog?.querySelector('[data-testid="app-bar-close"], [aria-label="Close"], [aria-label="Back"], [data-testid="confirmationSheetCancel"]');
-    if (closeButton instanceof HTMLElement) {
-      closeButton.click();
-      return true;
-    }
-
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    return false;
   }
 
   function isInsidePrimaryColumn(element) {
@@ -208,7 +236,6 @@
   function getPostRoot(element) {
     const candidate = element?.closest('[data-testid="tweet"], article[role="article"], article');
     if (!candidate || !isInsidePrimaryColumn(candidate)) return null;
-    if (!candidate.querySelector('button[data-testid="caret"]')) return null;
     if (!getPostStatusLink(candidate)) return null;
     return candidate;
   }
@@ -237,95 +264,16 @@
     });
   }
 
-  function getPostMenuButton(post) {
-    const buttons = [...post.querySelectorAll('button[data-testid="caret"][aria-haspopup="menu"], button[data-testid="caret"]')];
-    return buttons.find((button) => getPostRoot(button) === post && isElementVisible(button)) || null;
-  }
-
-  function getOpenMenus() {
-    return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"], [data-testid="DropdownMenu"]')]
-      .filter((menu) => isElementVisible(menu) && !isSecurityOrAccountText(menu.innerText));
-  }
-
-  function distanceBetweenRects(a, b) {
-    const ax = a.left + a.width / 2;
-    const ay = a.top + a.height / 2;
-    const bx = b.left + b.width / 2;
-    const by = b.top + b.height / 2;
-    return Math.hypot(ax - bx, ay - by);
-  }
-
-  function getMenuAnchoredToButton(menuButton, ignoredMenus = new Set()) {
-    const buttonRect = menuButton.getBoundingClientRect();
-    const menus = getOpenMenus().filter((menu) => !ignoredMenus.has(menu));
-    return menus.find((menu) => {
-      const menuRect = menu.getBoundingClientRect();
-      const nearButton = distanceBetweenRects(buttonRect, menuRect) <= CONFIG.menuAnchorMaxDistancePx;
-      const horizontallyPlausible = menuRect.left <= buttonRect.right + 420 && menuRect.right >= buttonRect.left - 420;
-      const verticallyPlausible = menuRect.top <= buttonRect.bottom + 520 && menuRect.bottom >= buttonRect.top - 120;
-      return nearButton && horizontallyPlausible && verticallyPlausible;
-    }) || null;
-  }
-
-  function getMenuDeleteItemForPost(menu, menuButton) {
-    if (!menu || !menuButton || menuButton.getAttribute('aria-expanded') === 'false') return null;
-
-    const candidates = [...menu.querySelectorAll('[role="menuitem"], [role="button"]')];
-    return candidates.find((item) => {
-      if (!isElementVisible(item)) return false;
-      const text = normalizeText(item.innerText || item.textContent);
-      return /^delete$/i.test(text) && !isSecurityOrAccountText(text);
-    }) || null;
-  }
-
-  function getConfirmationButton(dialog) {
-    const candidates = [
-      ...dialog.querySelectorAll('button[data-testid="confirmationSheetConfirm"], [role="button"]'),
-    ];
-
-    return candidates.find((button) => {
-      if (!isElementVisible(button)) return false;
-      const text = normalizeText(button.innerText || button.textContent || button.getAttribute('aria-label'));
-      return /^delete$/i.test(text);
-    }) || null;
-  }
-
-  function getPostDeleteConfirmationDialog() {
-    const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')].filter(isElementVisible);
-    return dialogs.find((dialog) => {
-      const text = normalizeText(dialog.innerText || '');
-      if (isSecurityOrAccountText(text)) return false;
-      if (/delete\s+(account|profile|message|conversation|list|bookmark|draft|all)/i.test(text)) return false;
-      if (!/delete/i.test(text)) return false;
-      if (!/(post|tweet|this can[’']?t be undone|this cannot be undone)/i.test(text)) return false;
-      return Boolean(getConfirmationButton(dialog));
-    }) || null;
-  }
-
   async function dismissSecurityPromptIfPresent() {
     const securityDialog = getBlockingSecurityDialog();
     if (!securityDialog) return false;
 
-    closeOutOfScopeDialog(securityDialog);
+    stripRunParam();
     state.skipped += 1;
-    setStatus(`Skipped and closed an out-of-scope account/security prompt.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    state.running = false;
+    setStatus(`Aborted on account/security prompt. Run flag removed; no clicks, keys, or dialog closing attempted.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
     await sleep(CONFIG.actionDelayMs);
     return true;
-  }
-
-  function trustedEnoughClick(element) {
-    if (!(element instanceof HTMLElement)) return;
-    element.focus?.();
-    element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window }));
-    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, composed: true, button: 0, buttons: 1, view: window }));
-    element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, composed: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 0, view: window }));
-    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, composed: true, button: 0, buttons: 0, view: window }));
-    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, button: 0, buttons: 0, view: window }));
-  }
-
-  async function dismissOpenMenuOrDialog() {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await sleep(100);
   }
 
   function skip(reason) {
@@ -418,7 +366,7 @@ Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
 
     if (shouldAbortForOutOfScopePage()) return;
 
-    setStatus('Running. Only verified post articles in the primary timeline will be touched. Sidebar, DM, settings, profile/account, passcode, and security UI are ignored.');
+    setStatus('Running in API-only mode. Only verified post articles in the primary column are scanned. If route/account/security UI appears, the run flag is removed and execution stops without clicks or keys.');
 
     while (state.running) {
       const beforeY = getScrollTop();
@@ -447,6 +395,8 @@ Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
       }
     }
   }
+
+  installRouteWatchdog();
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', run, { once: true });
