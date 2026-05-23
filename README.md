@@ -6,7 +6,7 @@ Chrome extension for deleting your tweets.
 
 Download the upload-ready ZIP from GitHub:
 
-https://github.com/jcr0ss/TweetRemover/raw/main/dist/TweetRemover-v1.0-chrome-web-store.zip
+https://github.com/jcr0ss/TweetRemover/raw/main/dist/TweetRemover-v1.0.2-chrome-web-store.zip
 
 To rebuild it locally:
 

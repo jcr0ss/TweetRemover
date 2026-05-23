@@ -3,8 +3,12 @@ document.addEventListener('DOMContentLoaded', function() {
   var removeTweetsButton = document.getElementById('removeTweetsButton');
   var removeTweetsWithRepliesButton = document.getElementById('removeTweetsWithRepliesButton');
 
+  function getHandle() {
+    return twitterHandleInput.value.trim().replace(/^@+/, '');
+  }
+
   removeTweetsButton.addEventListener('click', function() {
-    var twitterHandle = twitterHandleInput.value;
+    var twitterHandle = getHandle();
     if (twitterHandle) {
       var redirectUrl = 'https://x.com/' + encodeURIComponent(twitterHandle) + '?TweetRemover=true';
       chrome.tabs.update({url: redirectUrl});
@@ -13,7 +17,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   removeTweetsWithRepliesButton.addEventListener('click', function() {
-    var twitterHandle = twitterHandleInput.value;
+    var twitterHandle = getHandle();
     if (twitterHandle) {
       var redirectUrl = 'https://x.com/' + encodeURIComponent(twitterHandle) + '/with_replies?TweetRemover=true';
       chrome.tabs.update({url: redirectUrl});
