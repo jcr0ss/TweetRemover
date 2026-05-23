@@ -13,7 +13,6 @@ rm -f "$OUT_FILE"
 
 zip -q -r "$OUT_FILE" \
   manifest.json \
-  background.js \
   content.js \
   popup.html \
   popup.js \

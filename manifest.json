@@ -1,23 +1,19 @@
 {
   "manifest_version": 3,
   "name": "TweetRemover",
-  "version": "1.0.5",
-  "description": "Let's you delete your tweets on Twitter/X",
+  "version": "1.0.6",
+  "description": "Lets you delete your tweets on Twitter/X using a strict caret-delete-confirm UI flow.",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
   },
   "permissions": [
-    "scripting",
     "storage"
   ],
   "host_permissions": [
     "https://x.com/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
   "action": {
     "default_title": "Tweet Remover",
     "default_popup": "popup.html"

@@ -3,12 +3,12 @@
 
   const CONFIG = {
     queryParam: 'TweetRemover',
-    actionDelayMs: 450,
+    actionDelayMs: 650,
     cycleDelayMs: 1200,
+    waitTimeoutMs: 3500,
     maxIdleCycles: 10,
+    maxAttemptsPerPost: 2,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
-    deleteTweetQueryId: 'nxpZCY2K-I6QoFHAHeojFQ',
-    twitterBearerToken: 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
   };
 
   const state = {
@@ -24,10 +24,6 @@
 
   function hasRunParam() {
     return new URLSearchParams(window.location.search).get(CONFIG.queryParam) === 'true';
-  }
-
-  function shouldRun() {
-    return hasRunParam();
   }
 
   function stripRunParam() {
@@ -55,7 +51,7 @@
       'right:16px',
       'bottom:16px',
       'z-index:2147483647',
-      'max-width:360px',
+      'max-width:390px',
       'padding:12px 14px',
       'border-radius:12px',
       'background:rgba(15,20,25,0.94)',
@@ -90,7 +86,7 @@
 
   function isBlockedPath(pathname = window.location.pathname) {
     const path = pathname.toLowerCase();
-    return /(^|\/)(i\/chat|messages|settings|account|login|flow|security|checkpoint|passcode|logout|oauth|privacy|help|pin|recovery)(\/|$)/i.test(path);
+    return /(^|\/)(i\/chat|messages|settings|account|login|flow|security|checkpoint|passcode|logout|oauth|privacy|help|pin|recovery|compose|search|hashtag)(\/|$)/i.test(path);
   }
 
   function isAllowedRunSurface() {
@@ -99,7 +95,7 @@
 
     const path = window.location.pathname.replace(/\/+$/, '') || '/';
     const parts = path.split('/').filter(Boolean);
-    if (parts.length === 0 || parts.length > 3) return false;
+    if (parts.length !== 1 && !(parts.length === 2 && parts[1] === 'with_replies')) return false;
 
     const handle = parts[0] || '';
     const reservedRoots = new Set([
@@ -107,18 +103,19 @@
       'flow', 'security', 'checkpoint', 'passcode', 'compose', 'search', 'hashtag', 'privacy',
     ]);
 
-    if (!/^[_a-zA-Z0-9]{1,15}$/.test(handle) || reservedRoots.has(handle.toLowerCase())) return false;
-    if (parts.length === 1) return true;
-    if (parts.length === 2) return parts[1] === 'with_replies';
-    return parts.length === 3 && parts[1] === 'status' && /^\d+$/.test(parts[2]);
+    return /^[_a-zA-Z0-9]{1,15}$/.test(handle) && !reservedRoots.has(handle.toLowerCase());
+  }
+
+  function abortRun(reason) {
+    stripRunParam();
+    state.stopReason = reason;
+    state.running = false;
+    setStatus(`${reason}\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
   }
 
   function shouldAbortForOutOfScopePage() {
     if (isAllowedRunSurface()) return false;
-    stripRunParam();
-    state.stopReason = `Aborted: out-of-scope page ${window.location.pathname}. Run flag removed; no UI recovery attempted.`;
-    setStatus(`${state.stopReason}\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
-    state.running = false;
+    abortRun(`Aborted: out-of-scope page ${window.location.pathname}. Run flag removed; no recovery clicks attempted.`);
     return true;
   }
 
@@ -145,9 +142,28 @@
     abortIfUnsafe();
   }
 
+  function getVisibleDialogs() {
+    return [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')].filter(isElementVisible);
+  }
+
   function getBlockingSecurityDialog() {
-    const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')];
-    return dialogs.find((dialog) => isElementVisible(dialog) && isSecurityOrAccountText(dialog.innerText));
+    return getVisibleDialogs().find((dialog) => isSecurityOrAccountText(dialog.innerText));
+  }
+
+  function abortIfSecurityOrUnexpectedDialog(allowedDialog = null) {
+    const securityDialog = getBlockingSecurityDialog();
+    if (securityDialog) {
+      abortRun('Aborted: account/security/passcode dialog appeared. Run flag removed; no dialog clicks attempted.');
+      return true;
+    }
+
+    const unexpectedDialog = getVisibleDialogs().find((dialog) => dialog !== allowedDialog && !dialog.contains(allowedDialog));
+    if (unexpectedDialog) {
+      abortRun(`Aborted: unexpected dialog appeared (${normalizeText(unexpectedDialog.innerText).slice(0, 120) || 'no text'}). Run flag removed; no recovery clicks attempted.`);
+      return true;
+    }
+
+    return false;
   }
 
   function isInsidePrimaryColumn(element) {
@@ -190,49 +206,6 @@
     return null;
   }
 
-  function getCookieValue(name) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
-    return match ? decodeURIComponent(match[1]) : '';
-  }
-
-  async function deleteTweetByApi(tweetId) {
-    const csrfToken = getCookieValue('ct0');
-    if (!csrfToken) throw new Error('missing ct0 csrf cookie');
-
-    const response = await fetch(`/i/api/graphql/${CONFIG.deleteTweetQueryId}/DeleteTweet`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        authorization: `Bearer ${CONFIG.twitterBearerToken}`,
-        'content-type': 'application/json',
-        'x-csrf-token': csrfToken,
-        'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
-        'x-twitter-client-language': 'en',
-      },
-      body: JSON.stringify({
-        variables: { tweet_id: tweetId, dark_request: false },
-        queryId: CONFIG.deleteTweetQueryId,
-      }),
-    });
-
-    const text = await response.text();
-    let payload = null;
-    try { payload = text ? JSON.parse(text) : null; } catch (_) {}
-
-    if (!response.ok) {
-      const message = payload?.errors?.[0]?.message || text || `HTTP ${response.status}`;
-      throw new Error(message);
-    }
-
-    if (payload?.errors?.length) {
-      throw new Error(payload.errors.map((error) => error.message || error.code || 'unknown error').join('; '));
-    }
-
-    return payload;
-  }
-
   function getPostRoot(element) {
     const candidate = element?.closest('[data-testid="tweet"], article[role="article"], article');
     if (!candidate || !isInsidePrimaryColumn(candidate)) return null;
@@ -264,16 +237,43 @@
     });
   }
 
-  async function dismissSecurityPromptIfPresent() {
-    const securityDialog = getBlockingSecurityDialog();
-    if (!securityDialog) return false;
+  function findPostCaret(post) {
+    const caret = post.querySelector('button[data-testid="caret"]');
+    if (!isElementVisible(caret)) return null;
+    if (getPostRoot(caret) !== post) return null;
+    return caret;
+  }
 
-    stripRunParam();
-    state.skipped += 1;
-    state.running = false;
-    setStatus(`Aborted on account/security prompt. Run flag removed; no clicks, keys, or dialog closing attempted.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
-    await sleep(CONFIG.actionDelayMs);
-    return true;
+  function getVisibleMenus() {
+    return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
+  }
+
+  function getVisibleDeleteMenuItem() {
+    const menuItems = [...document.querySelectorAll('[role="menu"] [role="menuitem"], [data-testid="Dropdown"] [role="menuitem"]')];
+    return menuItems.find((item) => isElementVisible(item) && /^Delete$/i.test(normalizeText(item.innerText || item.textContent))) || null;
+  }
+
+  function getVisibleDeleteConfirmDialog() {
+    const dialogs = getVisibleDialogs();
+    return dialogs.find((dialog) => /delete/i.test(normalizeText(dialog.innerText))) || null;
+  }
+
+  function getVisibleDeleteConfirmButton(dialog) {
+    if (!dialog) return null;
+    const buttons = [...dialog.querySelectorAll('button, [role="button"]')];
+    return buttons.find((button) => isElementVisible(button) && /^Delete$/i.test(normalizeText(button.innerText || button.textContent))) || null;
+  }
+
+  async function waitFor(predicate, stepName) {
+    const started = Date.now();
+    while (Date.now() - started < CONFIG.waitTimeoutMs) {
+      if (!state.running || shouldAbortForOutOfScopePage()) return null;
+      const result = predicate();
+      if (result) return result;
+      await sleep(100);
+    }
+    skip(`${stepName} failed: timed out after ${CONFIG.waitTimeoutMs}ms`);
+    return null;
   }
 
   function skip(reason) {
@@ -281,44 +281,90 @@
     setStatus(`Skipped: ${reason}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
   }
 
+  // CLICK CALLSITE 1 OF 3: the target post article's own More/caret button only.
+  function clickPostCaret(caret) {
+    caret.click();
+  }
+
+  // CLICK CALLSITE 2 OF 3: the Delete menu item opened by that caret only.
+  function clickDeleteMenuItem(deleteMenuItem) {
+    deleteMenuItem.click();
+  }
+
+  // CLICK CALLSITE 3 OF 3: the Delete button in X's delete confirmation dialog only.
+  function clickConfirmDeleteButton(confirmButton) {
+    confirmButton.click();
+  }
+
   async function deletePost(post) {
     const attempts = state.attemptedPosts.get(post) || 0;
-    if (attempts >= 2) return false;
+    if (attempts >= CONFIG.maxAttemptsPerPost) return false;
     state.attemptedPosts.set(post, attempts + 1);
 
-    if (shouldAbortForOutOfScopePage()) return false;
+    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
 
     const postRoot = getPostRoot(post);
     if (!postRoot) {
-      skip('not a verified post in the primary column');
+      skip('step 1 caret failed: not a verified post article inside primaryColumn');
       return false;
     }
 
     const ownStatus = getOwnPostStatus(postRoot);
     if (!ownStatus?.tweetId) {
-      skip('post does not belong to the requested profile handle');
+      skip('step 1 caret failed: post does not belong to requested profile handle');
       return false;
     }
 
-    if (getBlockingSecurityDialog()) {
-      await dismissSecurityPromptIfPresent();
+    const caret = findPostCaret(postRoot);
+    if (!caret) {
+      skip(`step 1 caret failed for ${ownStatus.tweetId}: post-owned button[data-testid="caret"] not found or not visible`);
       return false;
     }
 
-    try {
-      setStatus(`Deleting verified post ${ownStatus.tweetId} via X post-delete API.
-Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
-      await deleteTweetByApi(ownStatus.tweetId);
-      state.deleted += 1;
-      postRoot.remove();
-      setStatus(`Deleted verified post ${ownStatus.tweetId}.
-Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
-      await sleep(CONFIG.actionDelayMs * 2);
-      return true;
-    } catch (error) {
-      skip(`API delete failed for ${ownStatus.tweetId}: ${error?.message || error}`);
+    if (getVisibleMenus().length > 0) {
+      abortRun('Aborted: a menu was already open before the post caret step. Run flag removed to avoid clicking a menu not opened from the target post caret.');
       return false;
     }
+
+    setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await sleep(150);
+    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
+    clickPostCaret(caret);
+
+    const deleteMenuItem = await waitFor(() => {
+      if (abortIfSecurityOrUnexpectedDialog()) return null;
+      return getVisibleDeleteMenuItem();
+    }, `step 2 delete menu item for ${ownStatus.tweetId}`);
+    if (!deleteMenuItem || !state.running) return false;
+
+    setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    clickDeleteMenuItem(deleteMenuItem);
+
+    const dialog = await waitFor(() => {
+      const confirmDialog = getVisibleDeleteConfirmDialog();
+      if (!confirmDialog) {
+        if (abortIfSecurityOrUnexpectedDialog()) return null;
+        return null;
+      }
+      if (abortIfSecurityOrUnexpectedDialog(confirmDialog)) return null;
+      return confirmDialog;
+    }, `step 3 delete confirmation dialog for ${ownStatus.tweetId}`);
+    if (!dialog || !state.running) return false;
+
+    const confirmButton = getVisibleDeleteConfirmButton(dialog);
+    if (!confirmButton) {
+      skip(`step 3 confirm delete failed for ${ownStatus.tweetId}: Delete confirmation button not found`);
+      return false;
+    }
+
+    setStatus(`Step 3/3: confirming Delete for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    clickConfirmDeleteButton(confirmButton);
+
+    await sleep(CONFIG.actionDelayMs * 2);
+    state.deleted += 1;
+    setStatus(`Deleted ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    return true;
   }
 
   function getScrollTop() {
@@ -340,13 +386,7 @@ Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
   }
 
   async function processVisiblePosts() {
-    if (shouldAbortForOutOfScopePage()) return 0;
-
-    const securityDialog = getBlockingSecurityDialog();
-    if (securityDialog) {
-      await dismissSecurityPromptIfPresent();
-      return 0;
-    }
+    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return 0;
 
     let deletedThisCycle = 0;
     const posts = getVisiblePostRoots();
@@ -361,12 +401,12 @@ Deleted: ${state.deleted} · Skipped: ${state.skipped}`);
   }
 
   async function run() {
-    if (state.running || !shouldRun()) return;
+    if (state.running || !hasRunParam()) return;
     state.running = true;
 
-    if (shouldAbortForOutOfScopePage()) return;
+    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return;
 
-    setStatus('Running in API-only mode. Only verified post articles in the primary column are scanned. If route/account/security UI appears, the run flag is removed and execution stops without clicks or keys.');
+    setStatus('Running UI-only deletion. Allowed runtime clicks are exactly: post caret → Delete menu item → Delete confirmation. No other clicks, keys, API deletes, or recovery UI actions.');
 
     while (state.running) {
       const beforeY = getScrollTop();
