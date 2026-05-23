@@ -1,7 +1,8 @@
 document.addEventListener('DOMContentLoaded', function() {
   var twitterHandleInput = document.getElementById('twitterHandle');
-  var removeTweetsButton = document.getElementById('removeTweetsButton');
-  var removeTweetsWithRepliesButton = document.getElementById('removeTweetsWithRepliesButton');
+  var deleteTweetsButton = document.getElementById('deleteTweetsButton');
+  var deleteTweetsWithRepliesButton = document.getElementById('deleteTweetsWithRepliesButton');
+  var deleteTweetsRepliesRepostsButton = document.getElementById('deleteTweetsRepliesRepostsButton');
 
   chrome.storage.local.get(['lastTwitterHandle'], function(result) {
     if (result.lastTwitterHandle) {
@@ -18,11 +19,11 @@ document.addEventListener('DOMContentLoaded', function() {
     chrome.storage.local.set({ lastTwitterHandle: twitterHandle });
   }
 
-  function openTweetRemover(includeReplies) {
+  function openTweetRemover(includeReplies, undoRetweets) {
     var twitterHandle = getHandle();
     if (twitterHandle) {
       rememberHandle(twitterHandle);
-      var redirectUrl = 'https://x.com/' + encodeURIComponent(twitterHandle) + (includeReplies ? '/with_replies' : '') + '?TweetRemover=true';
+      var redirectUrl = 'https://x.com/' + encodeURIComponent(twitterHandle) + (includeReplies ? '/with_replies' : '') + '?TweetRemover=true' + (undoRetweets ? '&undoRetweets=true' : '');
       chrome.tabs.update({url: redirectUrl});
       window.close();
     }
@@ -34,14 +35,18 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   twitterHandleInput.addEventListener('keydown', function(event) {
-    if (event.key === 'Enter') openTweetRemover(false);
+    if (event.key === 'Enter') openTweetRemover(false, false);
   });
 
-  removeTweetsButton.addEventListener('click', function() {
-    openTweetRemover(false);
+  deleteTweetsButton.addEventListener('click', function() {
+    openTweetRemover(false, false);
   });
 
-  removeTweetsWithRepliesButton.addEventListener('click', function() {
-    openTweetRemover(true);
+  deleteTweetsWithRepliesButton.addEventListener('click', function() {
+    openTweetRemover(true, false);
+  });
+
+  deleteTweetsRepliesRepostsButton.addEventListener('click', function() {
+    openTweetRemover(true, true);
   });
 });

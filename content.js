@@ -3,6 +3,7 @@
 
   const CONFIG = {
     queryParam: 'TweetRemover',
+    undoRetweetsParam: 'undoRetweets',
     actionDelayMs: 650,
     cycleDelayMs: 1200,
     waitTimeoutMs: 3500,
@@ -16,8 +17,10 @@
     running: false,
     deleted: 0,
     skipped: 0,
+    repostsUndone: 0,
     idleCycles: 0,
     attemptedPosts: new WeakMap(),
+    attemptedReposts: new WeakMap(),
     stopReason: '',
   };
 
@@ -27,11 +30,28 @@
     return new URLSearchParams(window.location.search).get(CONFIG.queryParam) === 'true';
   }
 
+  function hasUndoRetweetsParam() {
+    return new URLSearchParams(window.location.search).get(CONFIG.undoRetweetsParam) === 'true';
+  }
+
+  function getRunMode() {
+    const includeReplies = window.location.pathname.replace(/\/+$/, '').endsWith('/with_replies');
+    const undoRetweets = includeReplies && hasUndoRetweetsParam();
+    if (undoRetweets) return 'Delete Tweets + Replies + Undo Reposts/Retweets';
+    if (includeReplies) return 'Delete Tweets + Replies';
+    return 'Delete Tweets';
+  }
+
+  function getCountsText() {
+    return `Deleted: ${state.deleted} · Reposts undone: ${state.repostsUndone} · Skipped: ${state.skipped}`;
+  }
+
   function stripRunParam() {
     if (!hasRunParam()) return;
 
     const url = new URL(window.location.href);
     url.searchParams.delete(CONFIG.queryParam);
+    url.searchParams.delete(CONFIG.undoRetweetsParam);
     const next = `${url.pathname}${url.search}${url.hash}`;
     try {
       window.history.replaceState(window.history.state, document.title, next);
@@ -90,8 +110,19 @@
 
     if (blockedTextPattern.test(window.location.pathname)) return true;
     if (element) {
-      const context = element.closest('[role="dialog"], [role="menu"], [data-testid="Dropdown"], [data-testid="primaryColumn"], article, [data-testid="tweet"]') || element;
+      const isWholePage = element === document.body || element === document.documentElement;
+      const context = isWholePage
+        ? element
+        : (element.closest('[role="dialog"], [role="menu"], [data-testid="Dropdown"], [data-testid="primaryColumn"], article, [data-testid="tweet"]') || element);
       const contextText = normalizeText(context.innerText || context.textContent || '');
+
+      // Full-page scans only look for the actual passcode/recovery wall. The normal X
+      // shell can contain labels like "Chat" in the sidebar, which must not stop scrolling.
+      if (isWholePage) {
+        return /enter passcode|recover your encryption keys|decrypt your previous messages|forgot passcode|pin\/recovery/i.test(contextText)
+          || /pin\/recovery/i.test(window.location.pathname);
+      }
+
       if (blockedTextPattern.test(contextText)) return true;
     }
 
@@ -140,7 +171,7 @@
     stripRunParam();
     state.stopReason = reason;
     state.running = false;
-    setStatus(`${reason}\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    setStatus(`${reason}\n${getCountsText()}`);
   }
 
   function shouldAbortForOutOfScopePage() {
@@ -337,6 +368,93 @@
     }) || null;
   }
 
+  function isWithRepliesTimeline() {
+    const parts = window.location.pathname.split('/').filter(Boolean);
+    return parts.length === 2 && parts[1] === 'with_replies';
+  }
+
+  function shouldUndoRetweets() {
+    return hasUndoRetweetsParam() && isWithRepliesTimeline();
+  }
+
+  function getFirstStatusLinkRect(post) {
+    const link = getPostStatusLink(post);
+    return link?.getBoundingClientRect?.() || null;
+  }
+
+  function hasTargetProfileRepostContext(post, targetHandle) {
+    const statusRect = getFirstStatusLinkRect(post);
+    const postRect = post.getBoundingClientRect();
+    const topLimit = statusRect ? statusRect.top + Math.max(0, statusRect.height) + 16 : postRect.top + postRect.height * 0.45;
+    const topContextNodes = [...post.querySelectorAll('div, span, a')].filter((node) => {
+      if (!isElementVisible(node)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.top >= postRect.top - 2 && rect.top <= topLimit;
+    });
+    const topText = normalizeText(topContextNodes.map((node) => node.innerText || node.textContent || '').join(' '));
+    if (!/\b(reposted|retweeted)\b/i.test(topText)) return false;
+
+    return [...post.querySelectorAll('a[href]')].some((link) => {
+      if (!isElementVisible(link)) return false;
+      const rect = link.getBoundingClientRect();
+      if (rect.top < postRect.top - 2 || rect.top > topLimit) return false;
+      try {
+        const url = new URL(link.href, window.location.origin);
+        const parts = url.pathname.split('/').filter(Boolean);
+        return url.hostname === 'x.com' && parts.length === 1 && parts[0].toLowerCase() === targetHandle.toLowerCase();
+      } catch (_) {
+        return false;
+      }
+    });
+  }
+
+  function getRepostedStatus(post) {
+    const targetHandle = getTargetHandle();
+    const statusLink = getPostStatusLink(post);
+    if (!statusLink) return null;
+    if (getOwnPostStatus(post)) return null;
+    if (!hasTargetProfileRepostContext(post, targetHandle)) return null;
+
+    try {
+      const url = new URL(statusLink.href, window.location.origin);
+      const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+      if (!match) return null;
+      const [, handle, tweetId] = match;
+      return { handle, tweetId, url };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function findPostUndoRepostButton(post) {
+    const buttons = [...post.querySelectorAll('button[data-testid="unretweet"], button[aria-label*="Undo repost" i], button[aria-label*="Undo Repost"], button[aria-label*="reposted" i]')].filter(isElementVisible);
+    if (buttons.length !== 1) return null;
+    const button = buttons[0];
+    if (getPostRoot(button) !== post) return null;
+    const label = normalizeText(button.getAttribute('aria-label') || button.innerText || button.textContent || '');
+    if (isSecurityOrAccountText(label)) return null;
+    if (button.getAttribute('data-testid') === 'unretweet') return button;
+    return /undo repost|reposted|retweeted/i.test(label) ? button : null;
+  }
+
+  function getVisibleUndoRepostConfirm(button) {
+    const menuOrDialog = [...getVisibleMenus(), ...getVisibleDialogs()].find((container) => {
+      if (!isElementVisible(container)) return false;
+      const text = normalizeText(container.innerText || container.textContent || '');
+      if (!/\bundo\b/i.test(text) || !/\b(repost|retweet)\b/i.test(text)) return false;
+      if (isSecurityOrAccountText(text)) return false;
+      if (container.getAttribute('role') === 'menu' || container.matches('[data-testid="Dropdown"]')) return isMenuAnchoredToCaret(container, button);
+      return true;
+    });
+    if (!menuOrDialog) return null;
+
+    const controls = [...menuOrDialog.querySelectorAll('[role="menuitem"], button, [role="button"]')].filter(isElementVisible);
+    return controls.find((control) => {
+      const text = normalizeText(control.innerText || control.textContent || control.getAttribute('aria-label') || '');
+      return /^Undo\s+(repost|reposts|retweet|retweets)$/i.test(text) && !isSecurityOrAccountText(text);
+    }) || null;
+  }
+
   async function waitFor(predicate, stepName) {
     const started = Date.now();
     while (Date.now() - started < CONFIG.waitTimeoutMs) {
@@ -351,10 +469,10 @@
 
   function skip(reason) {
     state.skipped += 1;
-    setStatus(`Skipped: ${reason}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    setStatus(`Skipped: ${reason}.\n${getCountsText()}`);
   }
 
-  // CLICK CALLSITE 1 OF 3: the target post article's own More/caret button only.
+  // CLICK CALLSITE 1 OF 5: the target post article's own More/caret button only.
   function clickPostCaret(caret) {
     if (isPasscodeChatOrSecurityContext(caret)) {
       abortRun('Aborted: refused to click post caret because passcode/chat/security text was visible nearby.');
@@ -364,7 +482,7 @@
     return true;
   }
 
-  // CLICK CALLSITE 2 OF 3: the Delete menu item opened by that caret only.
+  // CLICK CALLSITE 2 OF 5: the Delete menu item opened by that caret only.
   function clickDeleteMenuItem(deleteMenuItem) {
     if (isPasscodeChatOrSecurityContext(deleteMenuItem)) {
       abortRun('Aborted: refused to click Delete because passcode/chat/security text was visible nearby.');
@@ -374,13 +492,33 @@
     return true;
   }
 
-  // CLICK CALLSITE 3 OF 3: the Delete button in X's delete confirmation dialog only.
+  // CLICK CALLSITE 3 OF 5: the Delete button in X's delete confirmation dialog only.
   function clickConfirmDeleteButton(confirmButton) {
     if (isPasscodeChatOrSecurityContext(confirmButton)) {
       abortRun('Aborted: refused to confirm Delete because passcode/chat/security text was visible nearby.');
       return false;
     }
     confirmButton.click();
+    return true;
+  }
+
+  // CLICK CALLSITE 4 OF 5: the target repost article's own Undo Repost/Retweet button only.
+  function clickPostUndoRepostButton(button) {
+    if (isPasscodeChatOrSecurityContext(button)) {
+      abortRun('Aborted: refused to click Undo Repost/Retweet because passcode/chat/security text was visible nearby.');
+      return false;
+    }
+    button.click();
+    return true;
+  }
+
+  // CLICK CALLSITE 5 OF 5: X's own confirmation control for Undo Repost/Retweet only.
+  function clickConfirmUndoRepostButton(confirmControl) {
+    if (isPasscodeChatOrSecurityContext(confirmControl)) {
+      abortRun('Aborted: refused to confirm Undo Repost/Retweet because passcode/chat/security text was visible nearby.');
+      return false;
+    }
+    confirmControl.click();
     return true;
   }
 
@@ -414,7 +552,7 @@
       return false;
     }
 
-    setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\n${getCountsText()}`);
     postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
     await sleep(150);
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
@@ -426,7 +564,7 @@
     }, `step 2 delete menu item for ${ownStatus.tweetId}`);
     if (!deleteMenuItem || !state.running) return false;
 
-    setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId}.\n${getCountsText()}`);
     if (!clickDeleteMenuItem(deleteMenuItem)) return false;
 
     const dialog = await waitFor(() => {
@@ -446,12 +584,70 @@
       return false;
     }
 
-    setStatus(`Step 3/3: confirming Delete for ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    setStatus(`Step 3/3: confirming Delete for ${ownStatus.tweetId}.\n${getCountsText()}`);
     if (!clickConfirmDeleteButton(confirmButton)) return false;
 
     await sleep(CONFIG.actionDelayMs * 2);
     state.deleted += 1;
-    setStatus(`Deleted ${ownStatus.tweetId}.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+    setStatus(`Deleted ${ownStatus.tweetId}.\n${getCountsText()}`);
+    return true;
+  }
+
+  async function undoRepost(post) {
+    const attempts = state.attemptedReposts.get(post) || 0;
+    if (attempts >= CONFIG.maxAttemptsPerPost) return false;
+    state.attemptedReposts.set(post, attempts + 1);
+
+    if (!shouldUndoRetweets()) return false;
+    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
+
+    const postRoot = getPostRoot(post);
+    if (!postRoot) {
+      skip('undo repost failed: not a verified post article inside primaryColumn');
+      return false;
+    }
+
+    const repostedStatus = getRepostedStatus(postRoot);
+    if (!repostedStatus?.tweetId) {
+      skip('undo repost skipped: article is not clearly a requested-profile repost/retweet');
+      return false;
+    }
+
+    const undoButton = findPostUndoRepostButton(postRoot);
+    if (!undoButton) {
+      skip(`undo repost failed for ${repostedStatus.tweetId}: exactly one post-owned reposted/unretweet button was not found`);
+      return false;
+    }
+
+    if (getVisibleMenus().length > 0) {
+      abortRun('Aborted: a menu was already open before the undo repost step. Run flag removed to avoid clicking a menu not opened from the target post.');
+      return false;
+    }
+
+    setStatus(`Undo repost/retweet: opening confirmation for ${repostedStatus.tweetId}.\n${getCountsText()}`);
+    postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await sleep(150);
+    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
+    if (!clickPostUndoRepostButton(undoButton)) return false;
+
+    const confirmControl = await waitFor(() => {
+      const control = getVisibleUndoRepostConfirm(undoButton);
+      if (control) {
+        const allowedDialog = control.closest('[role="dialog"], [aria-modal="true"]');
+        if (allowedDialog && abortIfSecurityOrUnexpectedDialog(allowedDialog)) return null;
+        return control;
+      }
+      if (abortIfSecurityOrUnexpectedDialog()) return null;
+      return null;
+    }, `undo repost confirmation for ${repostedStatus.tweetId}`);
+    if (!confirmControl || !state.running) return false;
+
+    setStatus(`Undo repost/retweet: confirming for ${repostedStatus.tweetId}.\n${getCountsText()}`);
+    if (!clickConfirmUndoRepostButton(confirmControl)) return false;
+
+    await sleep(CONFIG.actionDelayMs * 2);
+    state.repostsUndone += 1;
+    setStatus(`Undid repost/retweet ${repostedStatus.tweetId}.\n${getCountsText()}`);
     return true;
   }
 
@@ -481,16 +677,20 @@
   async function processVisiblePosts() {
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return 0;
 
-    let deletedThisCycle = 0;
+    let changedThisCycle = 0;
     const posts = getVisiblePostRoots();
 
     for (const post of posts) {
       if (!document.documentElement.contains(post)) continue;
-      if (await deletePost(post)) deletedThisCycle += 1;
+      if (shouldUndoRetweets() && !getOwnPostStatus(post)) {
+        if (await undoRepost(post)) changedThisCycle += 1;
+      } else if (await deletePost(post)) {
+        changedThisCycle += 1;
+      }
       if (!state.running) break;
     }
 
-    return deletedThisCycle;
+    return changedThisCycle;
   }
 
   async function run() {
@@ -499,7 +699,7 @@
 
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return;
 
-    setStatus('Running UI-only deletion. Allowed runtime clicks are exactly: post caret → Delete menu item → Delete confirmation. No other clicks, keys, API deletes, or recovery UI actions.');
+    setStatus(`Mode: ${getRunMode()}\nRunning UI-only cleanup. Allowed runtime clicks are exactly: post caret → Delete menu item → Delete confirmation${shouldUndoRetweets() ? ' OR post repost/retweet button → Undo repost/retweet confirmation' : ''}. No other clicks, keys, API deletes, or recovery UI actions.\n${getCountsText()}`);
 
     while (state.running) {
       const beforeY = getScrollTop();
@@ -515,7 +715,7 @@
       }
 
       if (isAtPageBottom() && state.idleCycles >= CONFIG.maxIdleCycles) {
-        setStatus(`Done.\nDeleted: ${state.deleted} · Skipped: ${state.skipped}`);
+        setStatus(`Done.\n${getCountsText()}`);
         state.running = false;
         break;
       }
