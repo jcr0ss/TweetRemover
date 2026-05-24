@@ -250,7 +250,7 @@
   }
 
   function getVisibleDialogs() {
-    return [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')].filter(isElementVisible);
+    return [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], [data-testid="confirmationSheetDialog"]')].filter(isElementVisible);
   }
 
   function getBlockingSecurityDialog() {
