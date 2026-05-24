@@ -2,7 +2,7 @@
 
 Chrome extension for deleting your tweets.
 
-## v1.0.11 safety scope
+## v1.0.13 safety scope
 
 TweetRemover runs on the requested X profile or `/with_replies` page, classifies each visible article before acting, and uses strict UI-only flows:
 
@@ -19,13 +19,13 @@ Undo reposts/retweets, when launched from `/with_replies` with undo reposts enab
 
 It classifies every visible post/tweet article inside `primaryColumn` as exactly one of: own post/reply, repost by the requested handle, other/non-actionable, or unknown. Own posts/replies require both the visible author handle and status URL handle to match the requested handle. Reposts require requested-handle/`You reposted` social context and exactly one post-owned `button[data-testid="unretweet"]`; repost status URLs are allowed to belong to the original author. It does not call X delete APIs, click sidebar/settings/chat/account/security UI, close passcode dialogs, send keyboard recovery actions, or attempt arbitrary cleanup clicks. If an out-of-scope page or unexpected/security dialog appears, it removes the run flag and stops.
 
-After a successful delete or undo repost, it waits for X's menu/dialog UI to disappear before moving to the next item. If X leaves behind a safe Undo repost menu from the previous allowed action, TweetRemover waits/skips clicking without inflating normal skipped counts or clicking into a page with a pre-existing menu.
+After a successful delete or undo repost, it waits for X's menu/dialog UI to disappear before moving to the next item. If X leaves behind a safe Undo repost menu from the previous allowed action, TweetRemover can continue the undo-repost flow for the next strictly classified repost without cleanup clicks; the delete flow still refuses to run into any pre-existing menu.
 
 ## Chrome Web Store package
 
 Download the upload-ready ZIP from GitHub:
 
-https://github.com/jcr0ss/TweetRemover/raw/main/dist/TweetRemover-v1.0.11-chrome-web-store.zip
+https://github.com/jcr0ss/TweetRemover/raw/main/dist/TweetRemover-v1.0.13-chrome-web-store.zip
 
 To rebuild it locally:
 

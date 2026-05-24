@@ -322,7 +322,12 @@
   }
 
   function getPostRoot(element) {
-    const candidate = element?.closest('[data-testid="tweet"], article[role="article"], article');
+    // Prefer the outer article. X keeps the "You reposted" social context as a
+    // sibling/ancestor of the inner [data-testid="tweet"] body; using the inner
+    // tweet as the root loses the repost marker and makes repost classification
+    // depend only on button state.
+    const articleRoot = element?.closest('article[role="article"], article');
+    const candidate = articleRoot || element?.closest('[data-testid="tweet"]');
     if (!candidate || !isInsidePrimaryColumn(candidate)) return null;
     if (!getPostStatusLink(candidate)) return null;
     return candidate;
@@ -332,8 +337,8 @@
     if (!isAllowedRunSurface()) return [];
 
     const candidates = [
-      ...document.querySelectorAll('[data-testid="primaryColumn"] [data-testid="tweet"]'),
       ...document.querySelectorAll('[data-testid="primaryColumn"] article[role="article"], [data-testid="primaryColumn"] article'),
+      ...document.querySelectorAll('[data-testid="primaryColumn"] [data-testid="tweet"]'),
     ];
 
     const unique = [];
@@ -449,12 +454,21 @@
     const overlays = getVisibleBlockingOverlays();
     if (overlays.length === 0) return false;
 
-    const allSafeUndoOverlays = overlays.every(isUndoRepostContainer);
-    if (!allSafeUndoOverlays) return false;
+    if (!hasOnlySafeUndoOverlays()) return false;
 
     const recentText = hasRecentAllowedAction() ? ' from the previous allowed action' : '';
     setStatus(`Waiting: X still shows safe Undo repost/retweet UI${recentText} before ${stepName} ${tweetId}; no cleanup clicks attempted.\n${getCountsText()}`);
     return true;
+  }
+
+  function hasOnlySafeUndoOverlays() {
+    const overlays = getVisibleBlockingOverlays();
+    return overlays.length > 0 && overlays.every(isUndoRepostContainer);
+  }
+
+  function noteProceedingPastSafeUndoUi(stepName, tweetId) {
+    const recentText = hasRecentAllowedAction() ? ' from the previous allowed action' : '';
+    setStatus(`Continuing: X still shows safe Undo repost/retweet UI${recentText} before ${stepName} ${tweetId}; no cleanup clicks attempted.\n${getCountsText()}`);
   }
 
   function shouldPauseForRecentAllowedStaleUi(stepName, tweetId) {
@@ -585,12 +599,13 @@
     const visibleSocialContext = [...post.querySelectorAll('[data-testid="socialContext"]')]
       .filter(isElementVisible)
       .map((node) => normalizeText(node.innerText || node.textContent || node.getAttribute('aria-label') || ''))
-      .find((text) => /\b(reposted|retweeted)\b/i.test(text));
+      .find((text) => /\b(reposted|retweeted)\b/i.test(text)
+        && (/\byou\s+(reposted|retweeted)\b/i.test(text) || text.toLowerCase().includes(`@${targetHandle.toLowerCase()}`)));
     if (visibleSocialContext) return { text: visibleSocialContext, marker: 'article-social-context' };
 
     const unretweetCount = [...post.querySelectorAll('button[data-testid="unretweet"]')]
       .filter((button) => isElementVisible(button) && getPostRoot(button) === post).length;
-    if (unretweetCount > 0) return { text: `post-owned unretweet button count ${unretweetCount}`, marker: 'unretweet-button', unretweetCount };
+    if (unretweetCount > 0) return { text: `ambiguous post-owned unretweet button count ${unretweetCount} without requested-handle/You reposted context`, marker: 'unretweet-button-only', unretweetCount };
 
     return null;
   }
@@ -656,7 +671,9 @@
     const unretweetCount = [...postRoot.querySelectorAll('button[data-testid="unretweet"]')]
       .filter((button) => isElementVisible(button) && getPostRoot(button) === postRoot).length;
 
-    if (repostContext && undoButton && unretweetCount === 1) {
+    const hasStrictRepostContext = repostContext && repostContext.marker !== 'unretweet-button-only';
+
+    if (hasStrictRepostContext && undoButton && unretweetCount === 1) {
       return {
         type: ARTICLE_CLASSIFICATION.REPOST_BY_REQUESTED_HANDLE,
         postRoot,
@@ -675,7 +692,9 @@
         status,
         socialContext: repostContext,
         deleteEligible: false,
-        reason: `repost article: delete path blocked; post-owned unretweet button count is ${unretweetCount}`,
+        reason: hasStrictRepostContext
+          ? `repost article: delete path blocked; post-owned unretweet button count is ${unretweetCount}`
+          : `ambiguous repost evidence: ${repostContext.text}`,
       };
     }
 
@@ -898,19 +917,32 @@
       return false;
     }
 
+    let preOpenedConfirmControl = null;
     if (getVisibleMenus().length > 0) {
-      if (shouldPauseForRecentAllowedStaleUi('undo repost', repostedStatus.tweetId)) return false;
-      abortRun('Aborted: a menu was already open before the undo repost step. Run flag removed to avoid clicking a menu not opened from the target post.');
-      return false;
+      preOpenedConfirmControl = getVisibleUndoRepostConfirm(undoButton);
+      if (preOpenedConfirmControl && hasOnlySafeUndoOverlays()) {
+        noteProceedingPastSafeUndoUi('undo repost confirmation', repostedStatus.tweetId);
+      } else if (hasOnlySafeUndoOverlays()) {
+        noteProceedingPastSafeUndoUi('undo repost', repostedStatus.tweetId);
+      } else if (shouldPauseForRecentAllowedStaleUi('undo repost', repostedStatus.tweetId)) {
+        return false;
+      }
+
+      if (!hasOnlySafeUndoOverlays()) {
+        abortRun('Aborted: a menu was already open before the undo repost step. Run flag removed to avoid clicking a menu not opened from the target post.');
+        return false;
+      }
     }
 
-    setStatus(`Undo repost/retweet: opening confirmation for ${repostedStatus.tweetId}.\n${getCountsText()}`);
-    postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
-    await sleep(150);
-    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
-    if (!clickPostUndoRepostButton(undoButton)) return false;
+    if (!preOpenedConfirmControl) {
+      setStatus(`Undo repost/retweet: opening confirmation for ${repostedStatus.tweetId}.\n${getCountsText()}`);
+      postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
+      await sleep(150);
+      if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
+      if (!clickPostUndoRepostButton(undoButton)) return false;
+    }
 
-    const confirmControl = await waitFor(() => {
+    const confirmControl = preOpenedConfirmControl || await waitFor(() => {
       const control = getVisibleUndoRepostConfirm(undoButton);
       if (control) {
         const allowedDialog = control.closest('[role="dialog"], [aria-modal="true"]');
@@ -957,7 +989,6 @@
 
   async function processVisiblePosts() {
     if (shouldAbortForOutOfScopePage()) return 0;
-    if (shouldPauseForSafeStaleUndoUi('timeline scan', 'next item')) return 0;
     if (abortIfSecurityOrUnexpectedDialog()) return 0;
 
     let changedThisCycle = 0;
