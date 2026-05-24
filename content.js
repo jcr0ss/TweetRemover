@@ -10,6 +10,8 @@
     menuAnchorMaxDistancePx: 650,
     maxIdleCycles: 10,
     maxAttemptsPerPost: 2,
+    postActionSettleTimeoutMs: 3500,
+    staleAllowedMenuGraceMs: 8000,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
   };
 
@@ -22,6 +24,7 @@
     attemptedPosts: new WeakMap(),
     attemptedReposts: new WeakMap(),
     stopReason: '',
+    recentAllowedAction: null,
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -328,6 +331,81 @@
     return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
   }
 
+  function isUndoRepostContainer(container) {
+    if (!container || !isElementVisible(container)) return false;
+    const text = normalizeText(container.innerText || container.textContent || '');
+    if (!/\bundo\b/i.test(text) || !/\b(repost|retweet)\b/i.test(text)) return false;
+    if (isSecurityOrAccountText(text)) return false;
+    if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(text)) return false;
+
+    const controls = [...container.querySelectorAll('[role="menuitem"], button, [role="button"]')].filter(isElementVisible);
+    return controls.some((control) => {
+      const controlText = normalizeText(control.innerText || control.textContent || control.getAttribute('aria-label') || '');
+      return /^Undo\s+(repost|reposts|retweet|retweets)$/i.test(controlText) && !isSecurityOrAccountText(controlText);
+    });
+  }
+
+  function markRecentAllowedAction(type, tweetId) {
+    state.recentAllowedAction = { type, tweetId, at: Date.now() };
+  }
+
+  function clearRecentAllowedAction() {
+    state.recentAllowedAction = null;
+  }
+
+  function hasRecentAllowedAction(type = null) {
+    const action = state.recentAllowedAction;
+    if (!action) return false;
+    if (type && action.type !== type) return false;
+    return Date.now() - action.at <= CONFIG.staleAllowedMenuGraceMs;
+  }
+
+  function getVisibleBlockingOverlays() {
+    return [...getVisibleMenus(), ...getVisibleDialogs()].filter(isElementVisible);
+  }
+
+  async function waitForAllowedUiToSettle(actionType, tweetId) {
+    const started = Date.now();
+
+    while (Date.now() - started < CONFIG.postActionSettleTimeoutMs) {
+      if (!state.running || shouldAbortForOutOfScopePage()) return false;
+      const securityDialog = getBlockingSecurityDialog();
+      if (securityDialog) {
+        abortRun('Aborted: account/security/passcode dialog appeared after an allowed action. Run flag removed; no cleanup clicks attempted.');
+        return false;
+      }
+      if (getVisibleBlockingOverlays().length === 0) {
+        clearRecentAllowedAction();
+        return true;
+      }
+      await sleep(100);
+    }
+
+    const menus = getVisibleMenus();
+    const dialogs = getVisibleDialogs();
+    if (dialogs.some((dialog) => isSecurityOrAccountText(dialog.innerText || dialog.textContent || ''))
+      || menus.some((menu) => isSecurityOrAccountText(menu.innerText || menu.textContent || ''))) {
+      abortRun('Aborted: account/security/passcode UI remained visible after an allowed action. Run flag removed; no cleanup clicks attempted.');
+      return false;
+    }
+
+    markRecentAllowedAction(actionType, tweetId);
+    setStatus(`Waiting: X left ${menus.length} menu(s) and ${dialogs.length} dialog(s) visible after ${actionType} ${tweetId}; no cleanup clicks attempted.\n${getCountsText()}`);
+    return false;
+  }
+
+  function shouldPauseForRecentAllowedStaleUi(stepName, tweetId) {
+    const overlays = getVisibleBlockingOverlays();
+    if (overlays.length === 0) return false;
+    if (!hasRecentAllowedAction()) return false;
+
+    const allSafeUndoOverlays = overlays.every(isUndoRepostContainer);
+    if (!allSafeUndoOverlays) return false;
+
+    skip(`${stepName} paused for ${tweetId}: X still shows safe Undo repost/retweet UI from the previous allowed action; no extra clicks attempted`);
+    return true;
+  }
+
   function getAnchoredDeleteMenuItem(caret) {
     const menus = getVisibleMenus().filter((menu) => isMenuAnchoredToCaret(menu, caret));
     if (menus.length !== 1) return null;
@@ -548,6 +626,7 @@
     }
 
     if (getVisibleMenus().length > 0) {
+      if (shouldPauseForRecentAllowedStaleUi('post caret', ownStatus.tweetId)) return false;
       abortRun('Aborted: a menu was already open before the post caret step. Run flag removed to avoid clicking a menu not opened from the target post caret.');
       return false;
     }
@@ -590,6 +669,7 @@
     await sleep(CONFIG.actionDelayMs * 2);
     state.deleted += 1;
     setStatus(`Deleted ${ownStatus.tweetId}.\n${getCountsText()}`);
+    await waitForAllowedUiToSettle('delete', ownStatus.tweetId);
     return true;
   }
 
@@ -620,6 +700,7 @@
     }
 
     if (getVisibleMenus().length > 0) {
+      if (shouldPauseForRecentAllowedStaleUi('undo repost', repostedStatus.tweetId)) return false;
       abortRun('Aborted: a menu was already open before the undo repost step. Run flag removed to avoid clicking a menu not opened from the target post.');
       return false;
     }
@@ -648,6 +729,7 @@
     await sleep(CONFIG.actionDelayMs * 2);
     state.repostsUndone += 1;
     setStatus(`Undid repost/retweet ${repostedStatus.tweetId}.\n${getCountsText()}`);
+    await waitForAllowedUiToSettle('undo repost/retweet', repostedStatus.tweetId);
     return true;
   }
 
@@ -675,7 +757,9 @@
   }
 
   async function processVisiblePosts() {
-    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return 0;
+    if (shouldAbortForOutOfScopePage()) return 0;
+    if (shouldPauseForRecentAllowedStaleUi('timeline', 'next item')) return 0;
+    if (abortIfSecurityOrUnexpectedDialog()) return 0;
 
     let changedThisCycle = 0;
     const posts = getVisiblePostRoots();
