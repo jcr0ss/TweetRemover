@@ -658,24 +658,36 @@
   }
 
   function getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots = []) {
-    const menus = getVisibleMenus()
+    const candidates = getVisibleMenus()
       .filter((menu) => isMenuAnchoredToCaret(menu, caret))
-      .filter((menu) => !isUnchangedPreExistingMenu(menu, preExistingMenuSnapshots));
-    if (menus.length !== 1) return null;
+      .filter((menu) => !isUnchangedPreExistingMenu(menu, preExistingMenuSnapshots))
+      .map((menu) => {
+        const menuText = normalizeText(menu.innerText || '');
+        if (isSecurityOrAccountText(menuText)) return null;
+        if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(menuText)) return null;
 
-    const menu = menus[0];
-    const menuText = normalizeText(menu.innerText || '');
-    if (isSecurityOrAccountText(menuText)) return null;
-    if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(menuText)) return null;
+        const menuItems = [...menu.querySelectorAll('[role="menuitem"]')].filter(isElementVisible);
+        const firstItem = menuItems[0] || null;
+        if (!firstItem) return null;
 
-    const menuItems = [...menu.querySelectorAll('[role="menuitem"]')].filter(isElementVisible);
-    const firstItem = menuItems[0] || null;
-    if (!firstItem) return null;
+        const firstText = normalizeText(firstItem.innerText || firstItem.textContent);
+        if (!/^Delete$/i.test(firstText)) return null;
 
-    const firstText = normalizeText(firstItem.innerText || firstItem.textContent);
-    if (!/^Delete$/i.test(firstText)) return null;
+        return {
+          menu,
+          firstItem,
+          distance: distanceBetweenRects(menu.getBoundingClientRect(), caret.getBoundingClientRect()),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.distance - b.distance);
 
-    return firstItem;
+    // X can leave multiple visible Delete menus during fast timeline cleanup.
+    // Pre-existing snapshots exclude unchanged old menus; if more than one new
+    // candidate remains, use the one physically closest to this post's caret.
+    // We still require it to be anchored to the caret and to have Delete as the
+    // first menu item, so we do not click unrelated menus.
+    return candidates[0]?.firstItem || null;
   }
 
   function getVisibleDeleteConfirmDialog() {
