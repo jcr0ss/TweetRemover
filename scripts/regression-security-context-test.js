@@ -249,6 +249,42 @@ async function main() {
 }
 
 {
+  const deleteItem = makeElement({ text: 'Delete post', attrs: { role: 'menuitem' }, rect: { width: 110, height: 30, top: 145, bottom: 175, left: 100, right: 210 } });
+  const menu = makeElement({
+    text: 'Edit post Delete post Pin to your profile',
+    attrs: { role: 'menu' },
+    children: [deleteItem],
+    rect: { width: 220, height: 160, top: 95, bottom: 255, left: 90, right: 310 },
+  });
+  const caret = makeElement({ rect: { width: 34, height: 34, top: 80, bottom: 114, left: 260, right: 294 } });
+  const preExistingSnapshot = [{ menu, text: 'Edit post Delete post Pin to your profile', left: 90, top: 95, width: 220, height: 160 }];
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getAnchoredDeleteMenuItem(caret, preExistingSnapshot),
+    deleteItem,
+    'reused X menu DOM node should remain eligible when it is anchored to the current caret, even if it matches a pre-click snapshot',
+  );
+}
+
+{
+  const deleteItem = makeElement({ text: 'Delete post', attrs: { role: 'menuitem' }, rect: { width: 110, height: 30, top: 145, bottom: 175, left: 100, right: 210 } });
+  const menu = makeElement({
+    text: 'Edit post Delete post Pin to your profile',
+    attrs: { role: 'menu' },
+    children: [deleteItem],
+    rect: { width: 220, height: 160, top: 700, bottom: 860, left: 90, right: 310 },
+  });
+  const caret = makeElement({ rect: { width: 34, height: 34, top: 80, bottom: 114, left: 260, right: 294 } });
+  const preExistingSnapshot = [{ menu, text: 'Edit post Delete post Pin to your profile', left: 90, top: 700, width: 220, height: 160 }];
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getAnchoredDeleteMenuItem(caret, preExistingSnapshot),
+    null,
+    'unchanged pre-existing Delete menus that are not anchored to the current caret must still be ignored',
+  );
+}
+
+{
   const deleteAccountItem = makeElement({ text: 'Delete account', attrs: { role: 'menuitem' } });
   const menu = makeElement({ text: 'Delete account', attrs: { role: 'menu' }, children: [deleteAccountItem] });
   const caret = makeElement();

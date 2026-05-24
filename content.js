@@ -6,10 +6,11 @@
     undoRetweetsParam: 'undoRetweets',
     cycleDelayMs: 350,
     waitTimeoutMs: 1100,
+    deleteMenuRetryAttempts: 4,
     pollIntervalMs: 50,
     menuAnchorMaxDistancePx: 650,
     maxIdleCycles: 8,
-    maxAttemptsPerPost: 2,
+    maxAttemptsPerPost: 4,
     postActionSettleTimeoutMs: 900,
     staleAllowedMenuGraceMs: 1500,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
@@ -645,6 +646,15 @@
       && Math.abs(current.height - snapshot.height) <= 2;
   }
 
+  function getMenuDiagnosticText(menu) {
+    const text = normalizeText(menu?.innerText || menu?.textContent || '');
+    const items = [...(menu?.querySelectorAll?.('[role="menuitem"], button, [role="button"]') || [])]
+      .filter(isElementVisible)
+      .map(getControlAccessibleText)
+      .filter(Boolean);
+    return `text="${text.slice(0, 180)}" items=${items.length}[${items.slice(0, 8).join(' | ')}]`;
+  }
+
   function getControlAccessibleText(control) {
     return normalizeText(
       control.getAttribute?.('aria-label')
@@ -692,19 +702,36 @@
     return controls.find((control) => isSafeDeletePostMenuText(getControlAccessibleText(control))) || null;
   }
 
-  function getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots = []) {
+  function inspectAnchoredDeleteMenu(caret, preExistingMenuSnapshots = []) {
+    const diagnostics = [];
     const candidates = getVisibleMenus()
-      .filter((menu) => !isUnchangedPreExistingMenu(menu, preExistingMenuSnapshots))
       .map((menu) => {
         const menuText = normalizeText(menu.innerText || menu.textContent || '');
-        if (!isPostCaretMenuText(menuText)) return null;
+        const anchored = isMenuAnchoredToCaret(menu, caret);
+        const unchangedPreExisting = isUnchangedPreExistingMenu(menu, preExistingMenuSnapshots);
+        const reusedAnchoredCandidate = unchangedPreExisting && anchored;
+
+        if (unchangedPreExisting && !reusedAnchoredCandidate) {
+          diagnostics.push(`ignored unchanged pre-existing menu: ${getMenuDiagnosticText(menu)}`);
+          return null;
+        }
+
+        if (!isPostCaretMenuText(menuText)) {
+          diagnostics.push(`not a post-caret menu: ${getMenuDiagnosticText(menu)}`);
+          return null;
+        }
 
         const deleteControl = getSafeDeletePostControl(menu);
-        if (!deleteControl) return null;
+        if (!deleteControl) {
+          diagnostics.push(`post menu without safe Delete row: ${getMenuDiagnosticText(menu)}`);
+          return null;
+        }
 
-        const anchored = isMenuAnchoredToCaret(menu, caret);
         const unusableRectFallback = !anchored && hasUnusableCompositedMenuRect(menu);
-        if (!anchored && !unusableRectFallback) return null;
+        if (!anchored && !unusableRectFallback) {
+          diagnostics.push(`safe Delete row was not anchored to this caret: ${getMenuDiagnosticText(menu)}`);
+          return null;
+        }
 
         return {
           menu,
@@ -718,15 +745,56 @@
       .sort((a, b) => Number(b.anchored) - Number(a.anchored) || a.distance - b.distance);
 
     const anchoredCandidates = candidates.filter((candidate) => candidate.anchored);
-    if (anchoredCandidates.length > 0) return anchoredCandidates[0].deleteControl;
+    if (anchoredCandidates.length > 0) {
+      return { deleteControl: anchoredCandidates[0].deleteControl, reason: 'found anchored safe Delete row', diagnostics };
+    }
 
     const fallbackCandidates = candidates.filter((candidate) => candidate.unusableRectFallback);
-    if (fallbackCandidates.length === 1) return fallbackCandidates[0].deleteControl;
+    if (fallbackCandidates.length === 1) {
+      return { deleteControl: fallbackCandidates[0].deleteControl, reason: 'found single 0,0 composited safe Delete row fallback', diagnostics };
+    }
 
     // If the only usable menus have unusable 0,0 DOMRects, click only when
     // there is exactly one newly-opened post-caret menu. Multiple unanchored
     // fallback candidates are ambiguous, so refuse to click.
-    return null;
+    if (fallbackCandidates.length > 1) diagnostics.push(`ambiguous fallback menus with safe Delete rows: ${fallbackCandidates.length}`);
+    if (candidates.length === 0 && diagnostics.length === 0) diagnostics.push('no visible menu candidates after caret click');
+    return { deleteControl: null, reason: diagnostics.join('; ') || 'Delete row not found', diagnostics };
+  }
+
+  function getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots = []) {
+    return inspectAnchoredDeleteMenu(caret, preExistingMenuSnapshots).deleteControl;
+  }
+
+  async function waitForDeleteMenuItemWithoutSkip(caret, preExistingMenuSnapshots, tweetId) {
+    const started = Date.now();
+    let lastInspection = { reason: 'Delete row not inspected yet', diagnostics: [] };
+
+    while (Date.now() - started < CONFIG.waitTimeoutMs) {
+      if (!state.running || shouldAbortForOutOfScopePage()) return { deleteMenuItem: null, reason: 'run stopped or page left scope' };
+      if (abortIfSecurityOrUnexpectedDialog()) return { deleteMenuItem: null, reason: 'security/unexpected dialog blocked Delete menu lookup' };
+
+      lastInspection = inspectAnchoredDeleteMenu(caret, preExistingMenuSnapshots);
+      if (lastInspection.deleteControl) return { deleteMenuItem: lastInspection.deleteControl, reason: lastInspection.reason };
+      await sleep(CONFIG.pollIntervalMs);
+    }
+
+    return { deleteMenuItem: null, reason: lastInspection.reason || `Delete row did not appear within ${CONFIG.waitTimeoutMs}ms` };
+  }
+
+  async function waitForDeleteDialogWithoutSkip(tweetId) {
+    const started = Date.now();
+    while (Date.now() - started < CONFIG.waitTimeoutMs) {
+      if (!state.running || shouldAbortForOutOfScopePage()) return { dialog: null, reason: 'run stopped or page left scope' };
+      const confirmDialog = getVisibleDeleteConfirmDialog();
+      if (confirmDialog) {
+        if (abortIfSecurityOrUnexpectedDialog(confirmDialog)) return { dialog: null, reason: 'security/unexpected dialog blocked Delete confirmation' };
+        return { dialog: confirmDialog, reason: 'found Delete confirmation dialog' };
+      }
+      if (abortIfSecurityOrUnexpectedDialog()) return { dialog: null, reason: 'security/unexpected dialog blocked Delete confirmation' };
+      await sleep(CONFIG.pollIntervalMs);
+    }
+    return { dialog: null, reason: `Delete confirmation dialog did not appear within ${CONFIG.waitTimeoutMs}ms for ${tweetId}` };
   }
 
   function getVisibleDeleteConfirmDialog() {
@@ -1038,7 +1106,34 @@
       abortRun('Aborted: refused to click Delete because passcode/chat/security text was visible nearby.');
       return false;
     }
-    deleteMenuItem.click();
+    deleteMenuItem.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    deleteMenuItem.focus?.({ preventScroll: true });
+
+    const rect = deleteMenuItem.getBoundingClientRect?.();
+    const clientX = rect ? Math.max(rect.left + 1, Math.min(rect.right - 1, rect.left + rect.width / 2)) : 0;
+    const clientY = rect ? Math.max(rect.top + 1, Math.min(rect.bottom - 1, rect.top + rect.height / 2)) : 0;
+    const PointerEventCtor = window.PointerEvent || globalThis.PointerEvent;
+    const MouseEventCtor = window.MouseEvent || globalThis.MouseEvent;
+
+    try {
+      if (PointerEventCtor) {
+        deleteMenuItem.dispatchEvent(new PointerEventCtor('pointerover', { bubbles: true, cancelable: true, clientX, clientY, button: 0, pointerType: 'mouse', isPrimary: true }));
+        deleteMenuItem.dispatchEvent(new PointerEventCtor('pointerenter', { bubbles: true, cancelable: true, clientX, clientY, button: 0, pointerType: 'mouse', isPrimary: true }));
+        deleteMenuItem.dispatchEvent(new PointerEventCtor('pointerdown', { bubbles: true, cancelable: true, clientX, clientY, button: 0, pointerType: 'mouse', isPrimary: true }));
+        deleteMenuItem.dispatchEvent(new PointerEventCtor('pointerup', { bubbles: true, cancelable: true, clientX, clientY, button: 0, pointerType: 'mouse', isPrimary: true }));
+      }
+      if (MouseEventCtor) {
+        deleteMenuItem.dispatchEvent(new MouseEventCtor('mouseover', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+        deleteMenuItem.dispatchEvent(new MouseEventCtor('mouseenter', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+        deleteMenuItem.dispatchEvent(new MouseEventCtor('mousedown', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+        deleteMenuItem.dispatchEvent(new MouseEventCtor('mouseup', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+        deleteMenuItem.dispatchEvent(new MouseEventCtor('click', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+      } else {
+        deleteMenuItem.click?.();
+      }
+    } catch (_) {
+      deleteMenuItem.click?.();
+    }
     return true;
   }
 
@@ -1114,36 +1209,56 @@
       if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
     }
 
-    const preExistingMenuSnapshots = getVisibleMenus().map(getMenuSnapshot);
+    let dialog = null;
+    let lastDeleteMenuFailure = 'Delete menu was not attempted';
 
-    setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\n${getCountsText()}`);
-    postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
-    await sleep(CONFIG.pollIntervalMs);
-    if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
-    if (!clickPostCaret(caret)) return false;
+    for (let menuAttempt = 1; menuAttempt <= CONFIG.deleteMenuRetryAttempts; menuAttempt += 1) {
+      if (menuAttempt > 1) {
+        const dismissResult = await tryDismissVisibleMenus();
+        if (dismissResult.security) {
+          abortRun(`Aborted: account/security/passcode menu appeared while retrying Delete for ${ownStatus.tweetId}. Run flag removed; no cleanup clicks attempted.`);
+          return false;
+        }
+        await sleep(CONFIG.pollIntervalMs * 2);
+        if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
+      }
 
-    const deleteMenuItem = await waitFor(() => {
-      if (abortIfSecurityOrUnexpectedDialog()) return null;
-      return getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots);
-    }, `step 2 delete menu item for ${ownStatus.tweetId}`);
-    if (!deleteMenuItem || !state.running) {
-      await tryDismissVisibleMenus();
-      return false;
+      const preExistingMenuSnapshots = getVisibleMenus().map(getMenuSnapshot);
+
+      setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId} (attempt ${menuAttempt}/${CONFIG.deleteMenuRetryAttempts}).\n${getCountsText()}`);
+      postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
+      await sleep(CONFIG.pollIntervalMs);
+      if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
+      if (!clickPostCaret(caret)) return false;
+
+      const menuResult = await waitForDeleteMenuItemWithoutSkip(caret, preExistingMenuSnapshots, ownStatus.tweetId);
+      const deleteMenuItem = menuResult.deleteMenuItem;
+      if (!deleteMenuItem || !state.running) {
+        lastDeleteMenuFailure = menuResult.reason || 'Delete row not found';
+        setStatus(`Retrying Delete menu for ${ownStatus.tweetId}: ${lastDeleteMenuFailure}.\n${getCountsText()}`);
+        continue;
+      }
+
+      setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId} (attempt ${menuAttempt}/${CONFIG.deleteMenuRetryAttempts}).\n${getCountsText()}`);
+      if (!clickDeleteMenuItem(deleteMenuItem)) return false;
+
+      const dialogResult = await waitForDeleteDialogWithoutSkip(ownStatus.tweetId);
+      if (dialogResult.dialog) {
+        dialog = dialogResult.dialog;
+        break;
+      }
+
+      lastDeleteMenuFailure = `Delete row clicked but confirmation did not open: ${dialogResult.reason}`;
+      setStatus(`Retrying Delete click for ${ownStatus.tweetId}: ${lastDeleteMenuFailure}.\n${getCountsText()}`);
     }
 
-    setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId}.\n${getCountsText()}`);
-    if (!clickDeleteMenuItem(deleteMenuItem)) return false;
+    if (!state.running) return false;
 
-    const dialog = await waitFor(() => {
-      const confirmDialog = getVisibleDeleteConfirmDialog();
-      if (!confirmDialog) {
-        if (abortIfSecurityOrUnexpectedDialog()) return null;
-        return null;
-      }
-      if (abortIfSecurityOrUnexpectedDialog(confirmDialog)) return null;
-      return confirmDialog;
-    }, `step 3 delete confirmation dialog for ${ownStatus.tweetId}`);
-    if (!dialog || !state.running) return false;
+    if (!dialog) {
+      await tryDismissVisibleMenus();
+      skip(`step 2 delete menu failed for ${ownStatus.tweetId} after ${CONFIG.deleteMenuRetryAttempts} attempts: ${lastDeleteMenuFailure}`);
+      return false;
+    }
 
     const confirmButton = getVisibleDeleteConfirmButton(dialog);
     if (!confirmButton) {
