@@ -2,7 +2,7 @@
 
 Chrome extension for deleting your tweets.
 
-## v1.0.13 safety scope
+## v1.0.14 safety scope
 
 TweetRemover runs on the requested X profile or `/with_replies` page, classifies each visible article before acting, and uses strict UI-only flows:
 
@@ -25,7 +25,7 @@ After a successful delete or undo repost, it waits for X's menu/dialog UI to dis
 
 Download the upload-ready ZIP from GitHub:
 
-https://github.com/jcr0ss/TweetRemover/raw/main/dist/TweetRemover-v1.0.13-chrome-web-store.zip
+https://github.com/jcr0ss/TweetRemover/raw/main/dist/TweetRemover-v1.0.14-chrome-web-store.zip
 
 To rebuild it locally:
 
