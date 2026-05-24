@@ -23,9 +23,17 @@
     idleCycles: 0,
     attemptedPosts: new WeakMap(),
     attemptedReposts: new WeakMap(),
+    countedUnknownPosts: new WeakSet(),
     stopReason: '',
     recentAllowedAction: null,
   };
+
+  const ARTICLE_CLASSIFICATION = Object.freeze({
+    OWN_POST_OR_REPLY: 'OWN_POST_OR_REPLY',
+    REPOST_BY_REQUESTED_HANDLE: 'REPOST_BY_REQUESTED_HANDLE',
+    OTHER_OR_NON_ACTIONABLE: 'OTHER_OR_NON_ACTIONABLE',
+    UNKNOWN: 'UNKNOWN',
+  });
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -246,6 +254,19 @@
     }) || null;
   }
 
+  function parseStatusLink(link) {
+    if (!link) return null;
+    try {
+      const url = new URL(link.href, window.location.origin);
+      const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+      if (!match) return null;
+      const [, handle, tweetId] = match;
+      return { handle, tweetId, url };
+    } catch (_) {
+      return null;
+    }
+  }
+
   function getTargetHandle() {
     const parts = window.location.pathname.split('/').filter(Boolean);
     return (parts[0] || '').replace(/^@+/, '').toLowerCase();
@@ -256,15 +277,8 @@
     const links = [...post.querySelectorAll('a[href*="/status/"]')];
 
     for (const link of links) {
-      try {
-        const url = new URL(link.href, window.location.origin);
-        const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
-        if (!match) continue;
-        const [, handle, tweetId] = match;
-        if (handle.toLowerCase() === targetHandle && isVerifiedAuthorHandle(post, targetHandle)) return { handle, tweetId, url };
-      } catch (_) {
-        // Ignore malformed links.
-      }
+      const status = parseStatusLink(link);
+      if (status?.handle?.toLowerCase() === targetHandle && isVerifiedAuthorHandle(post, targetHandle)) return status;
     }
 
     return null;
@@ -394,16 +408,20 @@
     return false;
   }
 
-  function shouldPauseForRecentAllowedStaleUi(stepName, tweetId) {
+  function shouldPauseForSafeStaleUndoUi(stepName, tweetId) {
     const overlays = getVisibleBlockingOverlays();
     if (overlays.length === 0) return false;
-    if (!hasRecentAllowedAction()) return false;
 
     const allSafeUndoOverlays = overlays.every(isUndoRepostContainer);
     if (!allSafeUndoOverlays) return false;
 
-    skip(`${stepName} paused for ${tweetId}: X still shows safe Undo repost/retweet UI from the previous allowed action; no extra clicks attempted`);
+    const recentText = hasRecentAllowedAction() ? ' from the previous allowed action' : '';
+    setStatus(`Waiting: X still shows safe Undo repost/retweet UI${recentText} before ${stepName} ${tweetId}; no cleanup clicks attempted.\n${getCountsText()}`);
     return true;
+  }
+
+  function shouldPauseForRecentAllowedStaleUi(stepName, tweetId) {
+    return shouldPauseForSafeStaleUndoUi(stepName, tweetId);
   }
 
   function getAnchoredDeleteMenuItem(caret) {
@@ -460,21 +478,32 @@
     return link?.getBoundingClientRect?.() || null;
   }
 
-  function hasTargetProfileRepostContext(post, targetHandle) {
+  function getTopContextLimit(post) {
     const statusRect = getFirstStatusLinkRect(post);
     const postRect = post.getBoundingClientRect();
-    const topLimit = statusRect ? statusRect.top + Math.max(0, statusRect.height) + 16 : postRect.top + postRect.height * 0.45;
-    const topContextNodes = [...post.querySelectorAll('div, span, a')].filter((node) => {
+    return statusRect ? statusRect.top + Math.max(0, statusRect.height) + 16 : postRect.top + postRect.height * 0.45;
+  }
+
+  function getTopContextNodes(post) {
+    const postRect = post.getBoundingClientRect();
+    const topLimit = getTopContextLimit(post);
+    return [...post.querySelectorAll('div, span, a')].filter((node) => {
       if (!isElementVisible(node)) return false;
       const rect = node.getBoundingClientRect();
       return rect.top >= postRect.top - 2 && rect.top <= topLimit;
     });
+  }
+
+  function hasTargetProfileRepostContext(post, targetHandle) {
+    const topContextNodes = getTopContextNodes(post);
     const topText = normalizeText(topContextNodes.map((node) => node.innerText || node.textContent || '').join(' '));
     if (!/\b(reposted|retweeted)\b/i.test(topText)) return false;
 
     return [...post.querySelectorAll('a[href]')].some((link) => {
       if (!isElementVisible(link)) return false;
       const rect = link.getBoundingClientRect();
+      const postRect = post.getBoundingClientRect();
+      const topLimit = getTopContextLimit(post);
       if (rect.top < postRect.top - 2 || rect.top > topLimit) return false;
       try {
         const url = new URL(link.href, window.location.origin);
@@ -486,6 +515,34 @@
     });
   }
 
+  function getRepostSocialContext(post, targetHandle) {
+    const topNodes = getTopContextNodes(post);
+    const topText = normalizeText(topNodes.map((node) => node.innerText || node.textContent || '').join(' '));
+    if (!/\b(reposted|retweeted)\b/i.test(topText)) return null;
+
+    const targetProfileLink = [...post.querySelectorAll('a[href]')].some((link) => {
+      if (!isElementVisible(link)) return false;
+      const rect = link.getBoundingClientRect();
+      const postRect = post.getBoundingClientRect();
+      if (rect.top < postRect.top - 2 || rect.top > getTopContextLimit(post)) return false;
+      try {
+        const url = new URL(link.href, window.location.origin);
+        const parts = url.pathname.split('/').filter(Boolean);
+        return url.hostname === 'x.com' && parts.length === 1 && parts[0].toLowerCase() === targetHandle.toLowerCase();
+      } catch (_) {
+        return false;
+      }
+    });
+
+    const handleText = `@${targetHandle.toLowerCase()}`;
+    const lowerText = topText.toLowerCase();
+    const saysYouReposted = /\byou\s+(reposted|retweeted)\b/i.test(topText);
+    const namesRequestedHandle = lowerText.includes(handleText) || targetProfileLink;
+    if (!saysYouReposted && !namesRequestedHandle) return null;
+
+    return { text: topText, saysYouReposted, namesRequestedHandle };
+  }
+
   function getRepostedStatus(post) {
     const targetHandle = getTargetHandle();
     const statusLink = getPostStatusLink(post);
@@ -493,26 +550,67 @@
     if (getOwnPostStatus(post)) return null;
     if (!hasTargetProfileRepostContext(post, targetHandle)) return null;
 
-    try {
-      const url = new URL(statusLink.href, window.location.origin);
-      const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
-      if (!match) return null;
-      const [, handle, tweetId] = match;
-      return { handle, tweetId, url };
-    } catch (_) {
-      return null;
-    }
+    return parseStatusLink(statusLink);
   }
 
   function findPostUndoRepostButton(post) {
-    const buttons = [...post.querySelectorAll('button[data-testid="unretweet"], button[aria-label*="Undo repost" i], button[aria-label*="Undo Repost"], button[aria-label*="reposted" i]')].filter(isElementVisible);
+    const buttons = [...post.querySelectorAll('button[data-testid="unretweet"]')].filter(isElementVisible);
     if (buttons.length !== 1) return null;
     const button = buttons[0];
     if (getPostRoot(button) !== post) return null;
     const label = normalizeText(button.getAttribute('aria-label') || button.innerText || button.textContent || '');
     if (isSecurityOrAccountText(label)) return null;
-    if (button.getAttribute('data-testid') === 'unretweet') return button;
-    return /undo repost|reposted|retweeted/i.test(label) ? button : null;
+    return button;
+  }
+
+  function classifyArticle(post) {
+    const postRoot = getPostRoot(post);
+    if (!postRoot) {
+      return { type: ARTICLE_CLASSIFICATION.UNKNOWN, reason: 'not a visible verified post article inside primaryColumn' };
+    }
+
+    const targetHandle = getTargetHandle();
+    const status = parseStatusLink(getPostStatusLink(postRoot));
+    if (!status?.tweetId) {
+      return { type: ARTICLE_CLASSIFICATION.UNKNOWN, reason: 'missing visible status URL' };
+    }
+
+    const ownStatus = getOwnPostStatus(postRoot);
+    if (ownStatus?.tweetId) {
+      return {
+        type: ARTICLE_CLASSIFICATION.OWN_POST_OR_REPLY,
+        postRoot,
+        status: ownStatus,
+        reason: 'visible author handle and status URL both match requested handle',
+      };
+    }
+
+    const socialContext = getRepostSocialContext(postRoot, targetHandle);
+    const undoButton = findPostUndoRepostButton(postRoot);
+    const unretweetCount = [...postRoot.querySelectorAll('button[data-testid="unretweet"]')]
+      .filter((button) => isElementVisible(button) && getPostRoot(button) === postRoot).length;
+
+    if (socialContext && undoButton && unretweetCount === 1) {
+      return {
+        type: ARTICLE_CLASSIFICATION.REPOST_BY_REQUESTED_HANDLE,
+        postRoot,
+        status,
+        undoButton,
+        socialContext,
+        reason: 'requested-handle repost social context with exactly one post-owned unretweet button',
+      };
+    }
+
+    if (socialContext && unretweetCount !== 1) {
+      return {
+        type: ARTICLE_CLASSIFICATION.UNKNOWN,
+        postRoot,
+        status,
+        reason: `requested-handle repost context found but post-owned unretweet button count is ${unretweetCount}`,
+      };
+    }
+
+    return { type: ARTICLE_CLASSIFICATION.OTHER_OR_NON_ACTIONABLE, postRoot, status, reason: 'not authored by requested handle and not clearly reposted by requested handle' };
   }
 
   function getVisibleUndoRepostConfirm(button) {
@@ -548,6 +646,15 @@
   function skip(reason) {
     state.skipped += 1;
     setStatus(`Skipped: ${reason}.\n${getCountsText()}`);
+  }
+
+  function skipUnknownOnce(post, reason) {
+    if (state.countedUnknownPosts.has(post)) {
+      setStatus(`Unknown article skipped without clicking: ${reason}.\n${getCountsText()}`);
+      return;
+    }
+    state.countedUnknownPosts.add(post);
+    skip(`unknown article: ${reason}; no click attempted`);
   }
 
   // CLICK CALLSITE 1 OF 5: the target post article's own More/caret button only.
@@ -600,24 +707,19 @@
     return true;
   }
 
-  async function deletePost(post) {
-    const attempts = state.attemptedPosts.get(post) || 0;
+  async function deletePost(classification) {
+    const postRoot = classification?.postRoot;
+    const ownStatus = classification?.status;
+    if (classification?.type !== ARTICLE_CLASSIFICATION.OWN_POST_OR_REPLY || !postRoot || !ownStatus?.tweetId) {
+      skip('delete refused: article was not classified as OWN_POST_OR_REPLY');
+      return false;
+    }
+
+    const attempts = state.attemptedPosts.get(postRoot) || 0;
     if (attempts >= CONFIG.maxAttemptsPerPost) return false;
-    state.attemptedPosts.set(post, attempts + 1);
+    state.attemptedPosts.set(postRoot, attempts + 1);
 
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
-
-    const postRoot = getPostRoot(post);
-    if (!postRoot) {
-      skip('step 1 caret failed: not a verified post article inside primaryColumn');
-      return false;
-    }
-
-    const ownStatus = getOwnPostStatus(postRoot);
-    if (!ownStatus?.tweetId) {
-      skip('step 1 caret failed: post does not belong to requested profile handle');
-      return false;
-    }
 
     const caret = findPostCaret(postRoot);
     if (!caret) {
@@ -673,27 +775,22 @@
     return true;
   }
 
-  async function undoRepost(post) {
-    const attempts = state.attemptedReposts.get(post) || 0;
+  async function undoRepost(classification) {
+    const postRoot = classification?.postRoot;
+    const repostedStatus = classification?.status;
+    if (classification?.type !== ARTICLE_CLASSIFICATION.REPOST_BY_REQUESTED_HANDLE || !postRoot || !repostedStatus?.tweetId) {
+      skip('undo repost refused: article was not classified as REPOST_BY_REQUESTED_HANDLE');
+      return false;
+    }
+
+    const attempts = state.attemptedReposts.get(postRoot) || 0;
     if (attempts >= CONFIG.maxAttemptsPerPost) return false;
-    state.attemptedReposts.set(post, attempts + 1);
+    state.attemptedReposts.set(postRoot, attempts + 1);
 
     if (!shouldUndoRetweets()) return false;
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
 
-    const postRoot = getPostRoot(post);
-    if (!postRoot) {
-      skip('undo repost failed: not a verified post article inside primaryColumn');
-      return false;
-    }
-
-    const repostedStatus = getRepostedStatus(postRoot);
-    if (!repostedStatus?.tweetId) {
-      skip('undo repost skipped: article is not clearly a requested-profile repost/retweet');
-      return false;
-    }
-
-    const undoButton = findPostUndoRepostButton(postRoot);
+    const undoButton = classification.undoButton || findPostUndoRepostButton(postRoot);
     if (!undoButton) {
       skip(`undo repost failed for ${repostedStatus.tweetId}: exactly one post-owned reposted/unretweet button was not found`);
       return false;
@@ -758,7 +855,7 @@
 
   async function processVisiblePosts() {
     if (shouldAbortForOutOfScopePage()) return 0;
-    if (shouldPauseForRecentAllowedStaleUi('timeline', 'next item')) return 0;
+    if (shouldPauseForSafeStaleUndoUi('timeline scan', 'next item')) return 0;
     if (abortIfSecurityOrUnexpectedDialog()) return 0;
 
     let changedThisCycle = 0;
@@ -766,10 +863,16 @@
 
     for (const post of posts) {
       if (!document.documentElement.contains(post)) continue;
-      if (shouldUndoRetweets() && !getOwnPostStatus(post)) {
-        if (await undoRepost(post)) changedThisCycle += 1;
-      } else if (await deletePost(post)) {
-        changedThisCycle += 1;
+      const classification = classifyArticle(post);
+
+      if (classification.type === ARTICLE_CLASSIFICATION.OWN_POST_OR_REPLY) {
+        if (await deletePost(classification)) changedThisCycle += 1;
+      } else if (classification.type === ARTICLE_CLASSIFICATION.REPOST_BY_REQUESTED_HANDLE) {
+        if (shouldUndoRetweets()) {
+          if (await undoRepost(classification)) changedThisCycle += 1;
+        }
+      } else if (classification.type === ARTICLE_CLASSIFICATION.UNKNOWN) {
+        skipUnknownOnce(post, classification.reason || 'classification was uncertain');
       }
       if (!state.running) break;
     }
