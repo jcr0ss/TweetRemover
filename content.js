@@ -37,12 +37,27 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  function getSearchParams() {
+    return new URLSearchParams(window.location.search || '');
+  }
+
   function hasRunParam() {
-    return new URLSearchParams(window.location.search).get(CONFIG.queryParam) === 'true';
+    return getSearchParams().get(CONFIG.queryParam) === 'true';
+  }
+
+  function hasTweetRemoverParams() {
+    const params = getSearchParams();
+    return params.has(CONFIG.queryParam) || params.has(CONFIG.undoRetweetsParam);
   }
 
   function hasUndoRetweetsParam() {
-    return new URLSearchParams(window.location.search).get(CONFIG.undoRetweetsParam) === 'true';
+    return getSearchParams().get(CONFIG.undoRetweetsParam) === 'true';
+  }
+
+  function shouldActivateFromUrl() {
+    // Popup buttons generate ?TweetRemover=true and optionally &undoRetweets=true.
+    // Anything else, including ordinary x.com browsing and stale/partial params, must be inert.
+    return hasRunParam();
   }
 
   function getRunMode() {
@@ -397,6 +412,41 @@
 
   function getVisibleMenus() {
     return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
+  }
+
+  function dispatchEscape() {
+    const eventInit = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
+    const KeyboardEventCtor = window.KeyboardEvent || globalThis.KeyboardEvent;
+    const event = KeyboardEventCtor ? new KeyboardEventCtor('keydown', eventInit) : null;
+    if (event) {
+      (document.activeElement || document.body || document.documentElement).dispatchEvent(event);
+      document.dispatchEvent(event);
+      window.dispatchEvent(event);
+    }
+  }
+
+  async function dismissPreExistingMenus(stepName, tweetId, anchor = null) {
+    let menus = getVisibleMenus();
+    if (menus.length === 0) return true;
+
+    if (menus.some((menu) => isSecurityOrAccountText(menu.innerText || menu.textContent || ''))) {
+      abortRun(`Aborted: account/security/passcode menu was open before ${stepName}. Run flag removed; no cleanup clicks attempted.`);
+      return false;
+    }
+
+    if (anchor && menus.length === 1 && isMenuAnchoredToCaret(menus[0], anchor)) return true;
+
+    setStatus(`Recovering: dismissing ${menus.length} pre-existing menu(s) before ${stepName} ${tweetId}; no menu item clicks attempted.\n${getCountsText()}`);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      dispatchEscape();
+      await sleep(150);
+      menus = getVisibleMenus();
+      if (menus.length === 0) return true;
+      if (anchor && menus.length === 1 && isMenuAnchoredToCaret(menus[0], anchor)) return true;
+    }
+
+    skip(`${stepName} ${tweetId}: pre-existing menu could not be dismissed safely; no target menu item clicked`);
+    return false;
   }
 
   function isUndoRepostContainer(container) {
@@ -862,8 +912,8 @@
 
     if (getVisibleMenus().length > 0) {
       if (shouldPauseForRecentAllowedStaleUi('post caret', ownStatus.tweetId)) return false;
-      abortRun('Aborted: a menu was already open before the post caret step. Run flag removed to avoid clicking a menu not opened from the target post caret.');
-      return false;
+      if (!await dismissPreExistingMenus('post caret', ownStatus.tweetId, caret)) return false;
+      if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
     }
 
     setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\n${getCountsText()}`);
@@ -1061,6 +1111,20 @@
     }
   }
 
+  if (window.__TWEET_REMOVER_TEST_HOOK__) {
+    window.__TweetRemoverTest = Object.freeze({
+      isPasscodeChatOrSecurityContext,
+      normalizeText,
+      hasRunParam,
+      hasTweetRemoverParams,
+      shouldActivateFromUrl,
+      dismissPreExistingMenus,
+      state,
+    });
+  }
+
+  if (!shouldActivateFromUrl()) return;
+
   window.__TweetRemoverDebug = Object.freeze({
     classifyVisibleArticles() {
       return getVisiblePostRoots().map((post, index) => {
@@ -1079,13 +1143,6 @@
       });
     },
   });
-
-  if (window.__TWEET_REMOVER_TEST_HOOK__) {
-    window.__TweetRemoverTest = Object.freeze({
-      isPasscodeChatOrSecurityContext,
-      normalizeText,
-    });
-  }
 
   installRouteWatchdog();
 

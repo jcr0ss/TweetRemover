@@ -8,15 +8,20 @@ const vm = require('vm');
 
 class HTMLElement {}
 
-function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, isDocumentElement = false } = {}) {
+function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, isDocumentElement = false, visible = true } = {}) {
   const element = new HTMLElement();
   element.innerText = text;
   element.textContent = text;
   element.style = {};
-  element.getBoundingClientRect = () => ({ width: 1, height: 1, top: 0, bottom: 1, left: 0, right: 1 });
+  element.getBoundingClientRect = () => visible
+    ? ({ width: 1, height: 1, top: 0, bottom: 1, left: 0, right: 1 })
+    : ({ width: 0, height: 0, top: 0, bottom: 0, left: 0, right: 0 });
   element.getAttribute = (name) => attrs[name] || null;
+  element.setAttribute = (name, value) => { attrs[name] = String(value); };
   element.matches = (selector) => Boolean(closestMap[selector]);
   element.querySelectorAll = () => [];
+  element.dispatchEvent = () => true;
+  element.appendChild = () => {};
   element.closest = (selectorList) => {
     for (const selector of selectorList.split(',').map((selector) => selector.trim())) {
       if (closestMap[selector]) return closestMap[selector];
@@ -28,7 +33,7 @@ function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, i
   return element;
 }
 
-function makeDocument(bodyText) {
+function makeDocument(bodyText, { menus = [], record = {}, menusDisappearAfterEscape = false } = {}) {
   const body = makeElement({ text: bodyText, isBody: true });
   const documentElement = makeElement({ text: bodyText, isDocumentElement: true });
   documentElement.appendChild = () => {};
@@ -44,17 +49,30 @@ function makeDocument(bodyText) {
     readyState: 'complete',
     getElementById: () => null,
     createElement: () => makeElement(),
-    querySelectorAll: () => [],
+    activeElement: body,
+    querySelectorAll: (selector) => {
+      if (selector === '[role="menu"], [data-testid="Dropdown"]') {
+        if (menusDisappearAfterEscape && record.windowDispatches > 0) return [];
+        return menus;
+      }
+      return [];
+    },
     addEventListener: () => {},
+    dispatchEvent: () => { record.documentDispatches = (record.documentDispatches || 0) + 1; return true; },
   };
 }
 
-function loadTweetRemover({ pathname = '/DptOfEfficiency/with_replies', bodyText = '' } = {}) {
+function loadTweetRemover({ pathname = '/DptOfEfficiency/with_replies', search = '', bodyText = '', menus = [], menusDisappearAfterEscape = false } = {}) {
   const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
-  const document = makeDocument(bodyText);
+  const record = { observers: 0, statusBoxes: 0, windowDispatches: 0 };
+  const document = makeDocument(bodyText, { menus, record, menusDisappearAfterEscape });
+  document.createElement = () => {
+    record.statusBoxes += 1;
+    return makeElement();
+  };
   const window = {
     __TWEET_REMOVER_TEST_HOOK__: true,
-    location: { hostname: 'x.com', pathname, search: '', hash: '', href: `https://x.com${pathname}` },
+    location: { hostname: 'x.com', pathname, search, hash: '', href: `https://x.com${pathname}${search}` },
     innerHeight: 1000,
     scrollY: 0,
     history: {
@@ -63,14 +81,18 @@ function loadTweetRemover({ pathname = '/DptOfEfficiency/with_replies', bodyText
       replaceState: () => {},
     },
     addEventListener: () => {},
+    dispatchEvent: () => { record.windowDispatches += 1; return true; },
     getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
     scrollTo: () => {},
+    KeyboardEvent: class {
+      constructor(type, init) { this.type = type; Object.assign(this, init); }
+    },
   };
   const sandbox = {
     window,
     document,
     HTMLElement,
-    MutationObserver: class { observe() {} },
+    MutationObserver: class { observe() { record.observers += 1; } },
     URL,
     URLSearchParams,
     console: { log() {} },
@@ -80,7 +102,7 @@ function loadTweetRemover({ pathname = '/DptOfEfficiency/with_replies', bodyText
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(source, sandbox, { filename: 'content.js' });
-  return { window, document };
+  return { window, document, record };
 }
 
 const normalTweetText = [
@@ -90,8 +112,10 @@ const normalTweetText = [
   '19 602 5.7K 66K',
 ].join(' ');
 
+async function main() {
+
 {
-  const { window } = loadTweetRemover({ bodyText: normalTweetText });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true&undoRetweets=true', bodyText: normalTweetText });
   const article = makeElement({ text: normalTweetText });
   const button = makeElement({
     attrs: { 'aria-label': '602 reposts. Reposted' },
@@ -107,7 +131,7 @@ const normalTweetText = [
 }
 
 {
-  const { window } = loadTweetRemover({ bodyText: 'Account security verification required' });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', bodyText: 'Account security verification required' });
   const dialog = makeElement({ text: 'Security verification Enter password Confirmation code' });
   const button = makeElement({
     attrs: { 'aria-label': 'Continue' },
@@ -122,7 +146,7 @@ const normalTweetText = [
 }
 
 {
-  const { window, document } = loadTweetRemover({ bodyText: 'Enter passcode Recover your encryption keys Forgot passcode' });
+  const { window, document } = loadTweetRemover({ search: '?TweetRemover=true', bodyText: 'Enter passcode Recover your encryption keys Forgot passcode' });
   assert.strictEqual(
     window.__TweetRemoverTest.isPasscodeChatOrSecurityContext(document.body),
     true,
@@ -130,4 +154,38 @@ const normalTweetText = [
   );
 }
 
+{
+  const { window, record } = loadTweetRemover({ pathname: '/DptOfEfficiency', search: '', bodyText: normalTweetText });
+  assert.strictEqual(window.__TweetRemoverTest.shouldActivateFromUrl(), false, 'ordinary profile URL without TweetRemover params must not activate');
+  assert.strictEqual(window.__TweetRemoverDebug, undefined, 'ordinary profile URL without TweetRemover params must not install debug/run helpers');
+  assert.strictEqual(record.observers, 0, 'ordinary profile URL without TweetRemover params must not install route/mutation watchdog');
+  assert.strictEqual(record.statusBoxes, 0, 'ordinary profile URL without TweetRemover params must not create bottom-right status UI');
+}
+
+{
+  const menu = makeElement({ text: 'Share Copy link Report post' });
+  const { window, record } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu], menusDisappearAfterEscape: true });
+  window.__TweetRemoverTest.state.running = true;
+  const result = await window.__TweetRemoverTest.dismissPreExistingMenus('post caret', '12345');
+  assert.strictEqual(result, true, 'unrelated pre-existing menu that closes on Escape should be dismissed so the caller can retry the target caret');
+  assert.strictEqual(window.__TweetRemoverTest.state.running, true, 'dismissed unrelated pre-existing menu should not abort the run');
+  assert.ok(record.windowDispatches > 0, 'pre-existing menu recovery should attempt Escape dismissal');
+}
+
+{
+  const menu = makeElement({ text: 'Share Copy link Report post' });
+  const { window, record } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
+  window.__TweetRemoverTest.state.running = true;
+  const result = await window.__TweetRemoverTest.dismissPreExistingMenus('post caret', '12345');
+  assert.strictEqual(result, false, 'unrelated pre-existing menu that remains visible should skip instead of aborting the run');
+  assert.strictEqual(window.__TweetRemoverTest.state.running, true, 'unrelated pre-existing menu should not remove run flag or abort immediately');
+  assert.ok(record.windowDispatches > 0, 'pre-existing menu recovery should attempt Escape dismissal');
+}
+
 console.log('regression-security-context-test: ok');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
