@@ -1106,10 +1106,17 @@
 
   // CLICK CALLSITE 2 OF 5: the Delete menu item opened by that caret only.
   function clickDeleteMenuItem(deleteMenuItem) {
-    if (isPasscodeChatOrSecurityContext(deleteMenuItem)) {
-      abortRun('Aborted: refused to click Delete because passcode/chat/security text was visible nearby.');
+    const deleteText = getControlAccessibleText(deleteMenuItem);
+    if (!isSafeDeletePostMenuText(deleteText)) {
+      skip(`delete refused: selected menu item was not a safe post Delete row (${deleteText || 'no text'})`);
       return false;
     }
+
+    // The Delete row was already selected from a target-anchored post-caret
+    // menu. Do not rescan the whole menu/article here: reply menus can contain
+    // benign text like "Leave this conversation", and tweets can contain words
+    // like security/chat. Full-page/security dialogs are still guarded by the
+    // surrounding abortIfSecurityOrUnexpectedDialog() checks.
     deleteMenuItem.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     deleteMenuItem.focus?.({ preventScroll: true });
 
