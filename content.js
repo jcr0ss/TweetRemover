@@ -117,28 +117,40 @@
   }
 
   function isPasscodeChatOrSecurityContext(element) {
-    const blockedTextPattern = /passcode|recover your encryption keys|decrypt your previous messages|forgot passcode|encrypted|encryption keys|chat|message|conversation|pin\/recovery|verification|verify your identity|authenticate|security|two[-\s]?factor|\b2fa\b|checkpoint|unlock your account|log in|login|password|confirmation code/i;
+    const blockingChromeTextPattern = /passcode|recover your encryption keys|decrypt your previous messages|forgot passcode|encrypted|encryption keys|chat|message|conversation|pin\/recovery|verification|verify your identity|authenticate|security|two[-\s]?factor|\b2fa\b|checkpoint|unlock your account|log in|login|password|confirmation code/i;
+    const blockingPageWallPattern = /enter passcode|recover your encryption keys|decrypt your previous messages|forgot passcode|pin\/recovery/i;
 
-    if (blockedTextPattern.test(window.location.pathname)) return true;
-    if (element) {
-      const isWholePage = element === document.body || element === document.documentElement;
-      const context = isWholePage
-        ? element
-        : (element.closest('[role="dialog"], [role="menu"], [data-testid="Dropdown"], [data-testid="primaryColumn"], article, [data-testid="tweet"]') || element);
-      const contextText = normalizeText(context.innerText || context.textContent || '');
-
-      // Full-page scans only look for the actual passcode/recovery wall. The normal X
-      // shell can contain labels like "Chat" in the sidebar, which must not stop scrolling.
-      if (isWholePage) {
-        return /enter passcode|recover your encryption keys|decrypt your previous messages|forgot passcode|pin\/recovery/i.test(contextText)
-          || /pin\/recovery/i.test(window.location.pathname);
-      }
-
-      if (blockedTextPattern.test(contextText)) return true;
-    }
+    if (isBlockedPath(window.location.pathname) || /pin\/recovery/i.test(window.location.pathname)) return true;
 
     const visiblePageText = normalizeText(document.body?.innerText || '').slice(0, 5000);
-    return /enter passcode|recover your encryption keys|decrypt your previous messages|forgot passcode/i.test(visiblePageText);
+    const hasBlockingPageWall = blockingPageWallPattern.test(visiblePageText);
+
+    if (!element) return hasBlockingPageWall;
+
+    const isWholePage = element === document.body || element === document.documentElement;
+    if (isWholePage) return hasBlockingPageWall;
+
+    // Only scan X chrome surfaces that can actually be account/security/recovery UI.
+    // Never scan the full primary column or article text here: ordinary posts often
+    // contain benign words like "national security", "message", or "chat", and those
+    // posts can also contain the legitimate repost/delete controls we are allowed to click.
+    const blockingChromeContext = element.closest('[role="dialog"], [role="menu"], [data-testid="Dropdown"]');
+    if (blockingChromeContext) {
+      const contextText = normalizeText(blockingChromeContext.innerText || blockingChromeContext.textContent || '');
+      return blockingChromeTextPattern.test(contextText) || hasBlockingPageWall;
+    }
+
+    // For in-timeline controls, only inspect the control's own accessible text. Do
+    // not inherit tweet body copy from the surrounding article/primary column.
+    const control = element.closest('button, [role="button"], a, [role="menuitem"]') || element;
+    const controlText = normalizeText([
+      control.getAttribute?.('aria-label'),
+      control.getAttribute?.('title'),
+      control.innerText,
+      control.textContent,
+    ].filter(Boolean).join(' '));
+
+    return blockingChromeTextPattern.test(controlText) || hasBlockingPageWall;
   }
 
   function isVerifiedAuthorHandle(post, expectedHandle) {
@@ -1067,6 +1079,13 @@
       });
     },
   });
+
+  if (window.__TWEET_REMOVER_TEST_HOOK__) {
+    window.__TweetRemoverTest = Object.freeze({
+      isPasscodeChatOrSecurityContext,
+      normalizeText,
+    });
+  }
 
   installRouteWatchdog();
 
