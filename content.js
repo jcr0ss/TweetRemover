@@ -4,14 +4,14 @@
   const CONFIG = {
     queryParam: 'TweetRemover',
     undoRetweetsParam: 'undoRetweets',
-    actionDelayMs: 650,
-    cycleDelayMs: 1200,
-    waitTimeoutMs: 3500,
+    cycleDelayMs: 350,
+    waitTimeoutMs: 1100,
+    pollIntervalMs: 50,
     menuAnchorMaxDistancePx: 650,
-    maxIdleCycles: 10,
+    maxIdleCycles: 8,
     maxAttemptsPerPost: 2,
-    postActionSettleTimeoutMs: 3500,
-    staleAllowedMenuGraceMs: 8000,
+    postActionSettleTimeoutMs: 900,
+    staleAllowedMenuGraceMs: 1500,
     scrollStep: Math.max(400, Math.floor(window.innerHeight * 0.75)),
   };
 
@@ -507,11 +507,11 @@
   }
 
   async function tryDismissVisibleMenus() {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       dispatchEscape();
       blurActiveElement();
       if (attempt >= 1) dispatchNeutralPointerDismiss();
-      await sleep(attempt < 2 ? 150 : 250);
+      await sleep(attempt === 0 ? 60 : 90);
       const menus = getVisibleMenus();
       if (menus.length === 0) return { dismissed: true, menus };
       if (menus.some((menu) => isSecurityOrAccountText(menu.innerText || menu.textContent || ''))) {
@@ -576,36 +576,6 @@
 
   function getVisibleBlockingOverlays() {
     return [...getVisibleMenus(), ...getVisibleDialogs()].filter(isElementVisible);
-  }
-
-  async function waitForAllowedUiToSettle(actionType, tweetId) {
-    const started = Date.now();
-
-    while (Date.now() - started < CONFIG.postActionSettleTimeoutMs) {
-      if (!state.running || shouldAbortForOutOfScopePage()) return false;
-      const securityDialog = getBlockingSecurityDialog();
-      if (securityDialog) {
-        abortRun('Aborted: account/security/passcode dialog appeared after an allowed action. Run flag removed; no cleanup clicks attempted.');
-        return false;
-      }
-      if (getVisibleBlockingOverlays().length === 0) {
-        clearRecentAllowedAction();
-        return true;
-      }
-      await sleep(100);
-    }
-
-    const menus = getVisibleMenus();
-    const dialogs = getVisibleDialogs();
-    if (dialogs.some((dialog) => isSecurityOrAccountText(dialog.innerText || dialog.textContent || ''))
-      || menus.some((menu) => isSecurityOrAccountText(menu.innerText || menu.textContent || ''))) {
-      abortRun('Aborted: account/security/passcode UI remained visible after an allowed action. Run flag removed; no cleanup clicks attempted.');
-      return false;
-    }
-
-    markRecentAllowedAction(actionType, tweetId);
-    setStatus(`Waiting: X left ${menus.length} menu(s) and ${dialogs.length} dialog(s) visible after ${actionType} ${tweetId}; no cleanup clicks attempted.\n${getCountsText()}`);
-    return false;
   }
 
   function shouldPauseForSafeStaleUndoUi(stepName, tweetId) {
@@ -941,10 +911,32 @@
       if (!state.running || shouldAbortForOutOfScopePage()) return null;
       const result = predicate();
       if (result) return result;
-      await sleep(100);
+      await sleep(CONFIG.pollIntervalMs);
     }
     skip(`${stepName} failed: timed out after ${CONFIG.waitTimeoutMs}ms`);
     return null;
+  }
+
+  async function waitBrieflyForPostAction(actionType, tweetId, isComplete) {
+    const started = Date.now();
+
+    while (Date.now() - started < CONFIG.postActionSettleTimeoutMs) {
+      if (!state.running || shouldAbortForOutOfScopePage()) return false;
+      const securityDialog = getBlockingSecurityDialog();
+      if (securityDialog) {
+        abortRun(`Aborted: account/security/passcode dialog appeared after ${actionType}. Run flag removed; no cleanup clicks attempted.`);
+        return false;
+      }
+      if (isComplete()) {
+        clearRecentAllowedAction();
+        return true;
+      }
+      await sleep(CONFIG.pollIntervalMs);
+    }
+
+    markRecentAllowedAction(actionType, tweetId);
+    setStatus(`Continuing: ${actionType} ${tweetId} was clicked; X did not settle within ${CONFIG.postActionSettleTimeoutMs}ms.\n${getCountsText()}`);
+    return false;
   }
 
   function skip(reason) {
@@ -1057,7 +1049,7 @@
 
     setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\n${getCountsText()}`);
     postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
-    await sleep(150);
+    await sleep(CONFIG.pollIntervalMs);
     if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
     if (!clickPostCaret(caret)) return false;
 
@@ -1093,10 +1085,12 @@
     setStatus(`Step 3/3: confirming Delete for ${ownStatus.tweetId}.\n${getCountsText()}`);
     if (!clickConfirmDeleteButton(confirmButton)) return false;
 
-    await sleep(CONFIG.actionDelayMs * 2);
+    await waitBrieflyForPostAction('delete', ownStatus.tweetId, () => (
+      !document.documentElement.contains(postRoot)
+      || (!getVisibleDeleteConfirmDialog() && getVisibleMenus().length === 0)
+    ));
     state.deleted += 1;
     setStatus(`Deleted ${ownStatus.tweetId}.\n${getCountsText()}`);
-    await waitForAllowedUiToSettle('delete', ownStatus.tweetId);
     return true;
   }
 
@@ -1139,7 +1133,7 @@
     if (!preOpenedConfirmControl) {
       setStatus(`Undo repost/retweet: opening confirmation for ${repostedStatus.tweetId}.\n${getCountsText()}`);
       postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
-      await sleep(150);
+      await sleep(CONFIG.pollIntervalMs);
       if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
       if (!clickPostUndoRepostButton(undoButton)) return false;
     }
@@ -1159,10 +1153,13 @@
     setStatus(`Undo repost/retweet: confirming for ${repostedStatus.tweetId}.\n${getCountsText()}`);
     if (!clickConfirmUndoRepostButton(confirmControl)) return false;
 
-    await sleep(CONFIG.actionDelayMs * 2);
+    await waitBrieflyForPostAction('undo repost/retweet', repostedStatus.tweetId, () => (
+      !document.documentElement.contains(postRoot)
+      || !findPostUndoRepostButton(postRoot)
+      || !getVisibleUndoRepostConfirm(undoButton)
+    ));
     state.repostsUndone += 1;
     setStatus(`Undid repost/retweet ${repostedStatus.tweetId}.\n${getCountsText()}`);
-    await waitForAllowedUiToSettle('undo repost/retweet', repostedStatus.tweetId);
     return true;
   }
 
