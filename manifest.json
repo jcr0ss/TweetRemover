@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TweetRemover",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "Lets you delete your tweets on Twitter/X using a strict caret-delete-confirm UI flow.",
   "icons": {
     "16": "icon16.png",

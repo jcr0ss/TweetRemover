@@ -674,7 +674,11 @@
 
   function isPostCaretMenuText(text) {
     if (isSecurityOrAccountText(text)) return false;
-    if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(text)) return false;
+    // Reply/thread post menus can legitimately include "Leave this conversation".
+    // Do not reject the whole post-caret menu for that; the actual clicked row is
+    // still constrained by isSafeDeletePostMenuText(), which rejects Delete
+    // account/message/chat/conversation/etc.
+    if (/chat|message|pin\s+chat|encrypted|keys/i.test(text)) return false;
     return /\bDelete\b/i.test(text)
       && /\b(Edit|Pin to your profile|View post activity|Embed post|View post analytics|Request Community Note)\b/i.test(text);
   }
