@@ -707,7 +707,10 @@
     return buttons.find((button) => {
       if (!isElementVisible(button)) return false;
       const text = normalizeText(button.innerText || button.textContent || button.getAttribute('aria-label'));
-      return /^Delete$/i.test(text) && !isSecurityOrAccountText(text);
+      const testId = button.getAttribute('data-testid') || '';
+      const isDeleteText = /^Delete(\s+(post|tweet))?$/i.test(text);
+      const isXConfirmButton = testId === 'confirmationSheetConfirm' && /delete/i.test(text || normalizeText(dialog.innerText || dialog.textContent || ''));
+      return (isDeleteText || isXConfirmButton) && !isSecurityOrAccountText(text);
     }) || null;
   }
 
@@ -1257,6 +1260,7 @@
       shouldActivateFromUrl,
       dismissPreExistingMenus,
       getVisibleMenus,
+      getVisibleDeleteConfirmButton,
       state,
     });
   }

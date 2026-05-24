@@ -21,6 +21,7 @@ function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, i
   element.matches = (selector) => Boolean(closestMap[selector]);
   element.querySelectorAll = (selector) => {
     if (selector === '[role="menuitem"]') return children.filter((child) => child.getAttribute?.('role') === 'menuitem');
+    if (selector === 'button, [role="button"]') return children.filter((child) => child.getAttribute?.('role') === 'button' || child.tagName === 'BUTTON');
     return [];
   };
   element.contains = (candidate) => candidate === element || children.includes(candidate);
@@ -207,6 +208,18 @@ async function main() {
     window.__TweetRemoverTest.getVisibleMenus().length,
     1,
     'nested X Dropdown/[role=menu] wrappers for the same visible menu must be counted once so target menu lookup can proceed',
+  );
+}
+
+{
+  const deletePostButton = makeElement({ text: 'Delete post', attrs: { role: 'button', 'data-testid': 'confirmationSheetConfirm' } });
+  deletePostButton.tagName = 'BUTTON';
+  const dialog = makeElement({ text: 'Delete Post? This can’t be undone and it will be removed from your profile.', attrs: { role: 'dialog' }, children: [deletePostButton] });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', bodyText: 'Delete Post? This can’t be undone' });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getVisibleDeleteConfirmButton(dialog),
+    deletePostButton,
+    'Delete confirmation should accept current X Delete post confirmation buttons, not only exact "Delete" text',
   );
 }
 
