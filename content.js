@@ -118,9 +118,17 @@
 
   function isElementVisible(element) {
     if (!(element instanceof HTMLElement)) return false;
+    if (!document.documentElement.contains(element)) return false;
+    if (element.hidden || element.getAttribute('aria-hidden') === 'true' || element.closest('[hidden], [aria-hidden="true"], [inert]')) return false;
+
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    return rect.width > 0
+      && rect.height > 0
+      && style.visibility !== 'hidden'
+      && style.display !== 'none'
+      && style.opacity !== '0'
+      && style.pointerEvents !== 'none';
   }
 
   function normalizeText(text) {
@@ -425,7 +433,63 @@
     }
   }
 
-  async function dismissPreExistingMenus(stepName, tweetId, anchor = null) {
+  function blurActiveElement() {
+    try {
+      if (document.activeElement && document.activeElement !== document.body && typeof document.activeElement.blur === 'function') {
+        document.activeElement.blur();
+      }
+    } catch (_) {
+      // Best-effort only.
+    }
+  }
+
+  function isNeutralDismissTarget(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.closest('[role="menu"], [data-testid="Dropdown"], [role="dialog"], article, [data-testid="tweet"], a, button, [role="button"], [role="menuitem"]')) return false;
+    if (isPasscodeChatOrSecurityContext(element)) return false;
+    return true;
+  }
+
+  function dispatchNeutralPointerDismiss() {
+    const points = [
+      [Math.max(8, Math.floor(window.innerWidth || 0) - 12), 12],
+      [12, 12],
+      [Math.floor((window.innerWidth || 800) / 2), 12],
+    ];
+    const MouseEventCtor = window.MouseEvent || globalThis.MouseEvent;
+
+    for (const [x, y] of points) {
+      const target = document.elementFromPoint?.(x, y) || document.body || document.documentElement;
+      if (!isNeutralDismissTarget(target)) continue;
+
+      if (MouseEventCtor) {
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+          target.dispatchEvent(new MouseEventCtor(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }));
+        }
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  async function tryDismissVisibleMenus() {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      dispatchEscape();
+      blurActiveElement();
+      if (attempt >= 1) dispatchNeutralPointerDismiss();
+      await sleep(attempt < 2 ? 150 : 250);
+      const menus = getVisibleMenus();
+      if (menus.length === 0) return { dismissed: true, menus };
+      if (menus.some((menu) => isSecurityOrAccountText(menu.innerText || menu.textContent || ''))) {
+        return { dismissed: false, menus, security: true };
+      }
+    }
+
+    return { dismissed: false, menus: getVisibleMenus() };
+  }
+
+  async function dismissPreExistingMenus(stepName, tweetId) {
     let menus = getVisibleMenus();
     if (menus.length === 0) return true;
 
@@ -434,19 +498,18 @@
       return false;
     }
 
-    if (anchor && menus.length === 1 && isMenuAnchoredToCaret(menus[0], anchor)) return true;
+    setStatus(`Recovering: dismissing ${menus.length} pre-existing actionable menu(s) before ${stepName} ${tweetId}; no menu item clicks attempted.\n${getCountsText()}`);
+    const result = await tryDismissVisibleMenus();
+    if (result.dismissed) return true;
 
-    setStatus(`Recovering: dismissing ${menus.length} pre-existing menu(s) before ${stepName} ${tweetId}; no menu item clicks attempted.\n${getCountsText()}`);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      dispatchEscape();
-      await sleep(150);
-      menus = getVisibleMenus();
-      if (menus.length === 0) return true;
-      if (anchor && menus.length === 1 && isMenuAnchoredToCaret(menus[0], anchor)) return true;
+    if (result.security) {
+      abortRun(`Aborted: account/security/passcode menu was open before ${stepName}. Run flag removed; no cleanup clicks attempted.`);
+      return false;
     }
 
-    skip(`${stepName} ${tweetId}: pre-existing menu could not be dismissed safely; no target menu item clicked`);
-    return false;
+    menus = result.menus || [];
+    setStatus(`Continuing cautiously: ${menus.length} unrelated pre-existing menu(s) remained before ${stepName} ${tweetId}; will only use a newly anchored target menu.\n${getCountsText()}`);
+    return true;
   }
 
   function isUndoRepostContainer(container) {
@@ -537,8 +600,34 @@
     return shouldPauseForSafeStaleUndoUi(stepName, tweetId);
   }
 
-  function getAnchoredDeleteMenuItem(caret) {
-    const menus = getVisibleMenus().filter((menu) => isMenuAnchoredToCaret(menu, caret));
+  function getMenuSnapshot(menu) {
+    const rect = menu.getBoundingClientRect();
+    return {
+      menu,
+      text: normalizeText(menu.innerText || menu.textContent || ''),
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  }
+
+  function isUnchangedPreExistingMenu(menu, snapshots = []) {
+    const snapshot = snapshots.find((candidate) => candidate.menu === menu);
+    if (!snapshot) return false;
+
+    const current = getMenuSnapshot(menu);
+    return current.text === snapshot.text
+      && Math.abs(current.left - snapshot.left) <= 2
+      && Math.abs(current.top - snapshot.top) <= 2
+      && Math.abs(current.width - snapshot.width) <= 2
+      && Math.abs(current.height - snapshot.height) <= 2;
+  }
+
+  function getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots = []) {
+    const menus = getVisibleMenus()
+      .filter((menu) => isMenuAnchoredToCaret(menu, caret))
+      .filter((menu) => !isUnchangedPreExistingMenu(menu, preExistingMenuSnapshots));
     if (menus.length !== 1) return null;
 
     const menu = menus[0];
@@ -916,6 +1005,8 @@
       if (shouldAbortForOutOfScopePage() || abortIfSecurityOrUnexpectedDialog()) return false;
     }
 
+    const preExistingMenuSnapshots = getVisibleMenus().map(getMenuSnapshot);
+
     setStatus(`Step 1/3: opening post menu for ${ownStatus.tweetId}.\n${getCountsText()}`);
     postRoot.scrollIntoView({ block: 'center', inline: 'nearest' });
     await sleep(150);
@@ -924,7 +1015,7 @@
 
     const deleteMenuItem = await waitFor(() => {
       if (abortIfSecurityOrUnexpectedDialog()) return null;
-      return getAnchoredDeleteMenuItem(caret);
+      return getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots);
     }, `step 2 delete menu item for ${ownStatus.tweetId}`);
     if (!deleteMenuItem || !state.running) return false;
 

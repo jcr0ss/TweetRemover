@@ -177,9 +177,19 @@ async function main() {
   const { window, record } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
   window.__TweetRemoverTest.state.running = true;
   const result = await window.__TweetRemoverTest.dismissPreExistingMenus('post caret', '12345');
-  assert.strictEqual(result, false, 'unrelated pre-existing menu that remains visible should skip instead of aborting the run');
+  assert.strictEqual(result, true, 'unrelated pre-existing menu that remains visible should not globally block later target-caret processing');
   assert.strictEqual(window.__TweetRemoverTest.state.running, true, 'unrelated pre-existing menu should not remove run flag or abort immediately');
+  assert.strictEqual(window.__TweetRemoverTest.state.skipped, 0, 'undismissable unrelated menu should not count as a per-post skip before the target caret is tried');
   assert.ok(record.windowDispatches > 0, 'pre-existing menu recovery should attempt Escape dismissal');
+}
+
+{
+  const hiddenMenu = makeElement({ text: 'Share Copy link Report post', attrs: { 'aria-hidden': 'true' } });
+  const { window, record } = loadTweetRemover({ search: '?TweetRemover=true', menus: [hiddenMenu] });
+  window.__TweetRemoverTest.state.running = true;
+  const result = await window.__TweetRemoverTest.dismissPreExistingMenus('post caret', '12345');
+  assert.strictEqual(result, true, 'hidden/stale role=menu elements must not block target caret processing');
+  assert.strictEqual(record.windowDispatches, 0, 'hidden/stale menus should be ignored without recovery key events');
 }
 
 console.log('regression-security-context-test: ok');
