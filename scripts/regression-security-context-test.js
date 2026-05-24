@@ -8,13 +8,13 @@ const vm = require('vm');
 
 class HTMLElement {}
 
-function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, isDocumentElement = false, visible = true, children = [] } = {}) {
+function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, isDocumentElement = false, visible = true, children = [], rect = null, style = {} } = {}) {
   const element = new HTMLElement();
   element.innerText = text;
   element.textContent = text;
-  element.style = {};
+  element.style = style;
   element.getBoundingClientRect = () => visible
-    ? ({ width: 1, height: 1, top: 0, bottom: 1, left: 0, right: 1 })
+    ? (rect || { width: 1, height: 1, top: 0, bottom: 1, left: 0, right: 1 })
     : ({ width: 0, height: 0, top: 0, bottom: 0, left: 0, right: 0 });
   element.getAttribute = (name) => attrs[name] || null;
   element.setAttribute = (name, value) => { attrs[name] = String(value); };
@@ -22,6 +22,9 @@ function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, i
   element.querySelectorAll = (selector) => {
     if (selector === '[role="menuitem"]') return children.filter((child) => child.getAttribute?.('role') === 'menuitem');
     if (selector === 'button, [role="button"]') return children.filter((child) => child.getAttribute?.('role') === 'button' || child.tagName === 'BUTTON');
+    if (selector === '[role="menuitem"], button, [role="button"]') {
+      return children.filter((child) => child.getAttribute?.('role') === 'menuitem' || child.getAttribute?.('role') === 'button' || child.tagName === 'BUTTON');
+    }
     return [];
   };
   element.contains = (candidate) => candidate === element || children.includes(candidate);
@@ -87,7 +90,7 @@ function loadTweetRemover({ pathname = '/DptOfEfficiency/with_replies', search =
     },
     addEventListener: () => {},
     dispatchEvent: () => { record.windowDispatches += 1; return true; },
-    getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
+    getComputedStyle: (element) => ({ visibility: 'visible', display: 'block', opacity: '1', pointerEvents: 'auto', ...(element?.style || {}) }),
     scrollTo: () => {},
     KeyboardEvent: class {
       constructor(type, init) { this.type = type; Object.assign(this, init); }
@@ -199,6 +202,22 @@ async function main() {
 
 {
   const menuItem = makeElement({ text: 'Delete', attrs: { role: 'menuitem' } });
+  const transparentMenu = makeElement({
+    text: 'Delete Edit Pin to your profile',
+    attrs: { role: 'menu' },
+    children: [menuItem],
+    style: { opacity: '0', display: 'flex', visibility: 'visible', pointerEvents: 'auto' },
+  });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [transparentMenu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getVisibleMenus().length,
+    1,
+    'X menu containers with opacity:0 but visible/clickable menuitems should still count as visible menus',
+  );
+}
+
+{
+  const menuItem = makeElement({ text: 'Delete', attrs: { role: 'menuitem' } });
   const outerDropdown = makeElement({ text: 'Delete Edit Pin to your profile', attrs: { 'data-testid': 'Dropdown' }, children: [menuItem] });
   const innerRoleMenu = makeElement({ text: 'Delete Edit Pin to your profile', attrs: { role: 'menu' }, children: [menuItem] });
   outerDropdown.contains = (candidate) => candidate === outerDropdown || candidate === innerRoleMenu || candidate === menuItem;
@@ -208,6 +227,67 @@ async function main() {
     window.__TweetRemoverTest.getVisibleMenus().length,
     1,
     'nested X Dropdown/[role=menu] wrappers for the same visible menu must be counted once so target menu lookup can proceed',
+  );
+}
+
+{
+  const editItem = makeElement({ text: 'Edit post', attrs: { role: 'menuitem' }, rect: { width: 90, height: 30, top: 110, bottom: 140, left: 100, right: 190 } });
+  const deleteItem = makeElement({ text: 'Delete post', attrs: { role: 'menuitem' }, rect: { width: 110, height: 30, top: 145, bottom: 175, left: 100, right: 210 } });
+  const menu = makeElement({
+    text: 'Edit post Delete post Pin to your profile',
+    attrs: { role: 'menu' },
+    children: [editItem, deleteItem],
+    rect: { width: 220, height: 160, top: 95, bottom: 255, left: 90, right: 310 },
+  });
+  const caret = makeElement({ rect: { width: 34, height: 34, top: 80, bottom: 114, left: 260, right: 294 } });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getAnchoredDeleteMenuItem(caret),
+    deleteItem,
+    'Delete menu lookup should select an exact Delete post row even when it is not the first menu item',
+  );
+}
+
+{
+  const deleteAccountItem = makeElement({ text: 'Delete account', attrs: { role: 'menuitem' } });
+  const menu = makeElement({ text: 'Delete account', attrs: { role: 'menu' }, children: [deleteAccountItem] });
+  const caret = makeElement();
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getAnchoredDeleteMenuItem(caret),
+    null,
+    'Delete menu lookup must not accept destructive non-post labels such as Delete account',
+  );
+}
+
+{
+  const deleteItem = makeElement({ text: 'Delete', attrs: { role: 'menuitem' }, rect: { width: 290, height: 44, top: 0, bottom: 44, left: 0, right: 290 } });
+  const menu = makeElement({
+    text: 'Delete Edit Pin to your profile View post activity Embed post View post analytics Request Community Note',
+    attrs: { role: 'menu' },
+    children: [deleteItem],
+    rect: { width: 290, height: 484, top: 0, bottom: 484, left: 0, right: 290 },
+  });
+  const caret = makeElement({ rect: { width: 34, height: 34, top: 560, bottom: 594, left: 1140, right: 1174 } });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getAnchoredDeleteMenuItem(caret),
+    deleteItem,
+    'Delete menu lookup should allow one newly-opened X post menu when Chrome reports a bogus 0,0 composited menu rect',
+  );
+}
+
+{
+  const deleteItemA = makeElement({ text: 'Delete', attrs: { role: 'menuitem' } });
+  const deleteItemB = makeElement({ text: 'Delete', attrs: { role: 'menuitem' } });
+  const menuA = makeElement({ text: 'Delete Edit Pin to your profile', attrs: { role: 'menu' }, children: [deleteItemA], rect: { width: 290, height: 132, top: 0, bottom: 132, left: 0, right: 290 } });
+  const menuB = makeElement({ text: 'Delete Edit Pin to your profile', attrs: { role: 'menu' }, children: [deleteItemB], rect: { width: 300, height: 132, top: 0, bottom: 132, left: 0, right: 300 } });
+  const caret = makeElement({ rect: { width: 34, height: 34, top: 560, bottom: 594, left: 1140, right: 1174 } });
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [menuA, menuB] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getAnchoredDeleteMenuItem(caret),
+    null,
+    'Delete menu lookup should refuse multiple unanchored 0,0 fallback menus because they are ambiguous',
   );
 }
 

@@ -1,30 +1,222 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Twitter Handle Redirect</title>
+  <title>TweetRemover</title>
   <style>
-    body {
-      width: 300px;
-      padding: 10px;
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --panel: #f7f9fb;
+      --text: #0f1419;
+      --muted: #536471;
+      --border: #d7dee5;
+      --primary: #0f1419;
+      --primary-hover: #272c30;
+      --secondary-hover: #eef2f5;
+      --danger: #f4212e;
+      --focus: rgba(29, 155, 240, 0.25);
     }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1419;
+        --panel: #16181c;
+        --text: #f7f9f9;
+        --muted: #8b98a5;
+        --border: #2f3336;
+        --primary: #f7f9f9;
+        --primary-hover: #dbe1e5;
+        --secondary-hover: #1d2226;
+        --focus: rgba(29, 155, 240, 0.35);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 360px;
+      margin: 0;
+      padding: 18px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    .header {
+      margin-bottom: 14px;
+    }
+
+    .eyebrow {
+      color: var(--danger);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      margin: 0 0 4px;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      font-size: 22px;
+      line-height: 1.1;
+      margin: 0 0 6px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin: 0;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: 0 8px 28px rgba(15, 20, 25, 0.08);
+    }
+
+    label {
+      display: block;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 7px;
+    }
+
+    .input-wrap {
+      position: relative;
+      margin-bottom: 12px;
+    }
+
+    .at-sign {
+      position: absolute;
+      left: 13px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted);
+      font-weight: 700;
+      pointer-events: none;
+    }
+
     input {
       width: 100%;
-      padding: 5px;
-      margin-bottom: 10px;
+      height: 42px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      font-weight: 600;
+      outline: none;
+      padding: 0 12px 0 31px;
+      transition: border-color 140ms ease, box-shadow 140ms ease;
     }
+
+    input:focus {
+      border-color: #1d9bf0;
+      box-shadow: 0 0 0 4px var(--focus);
+    }
+
+    .actions {
+      display: grid;
+      gap: 8px;
+    }
+
     button {
       width: 100%;
-      padding: 5px;
-      margin-bottom: 10px;
+      min-height: 42px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+      padding: 10px 12px;
+      text-align: left;
+      transition: background 140ms ease, border-color 140ms ease, transform 80ms ease, opacity 140ms ease;
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.52;
+    }
+
+    .primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: var(--bg);
+      text-align: center;
+    }
+
+    .primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+      border-color: var(--primary-hover);
+    }
+
+    .secondary {
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .secondary:hover:not(:disabled) {
+      background: var(--secondary-hover);
+    }
+
+    .button-title {
+      display: block;
+      line-height: 1.15;
+    }
+
+    .button-note {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+
+    .footnote {
+      color: var(--muted);
+      font-size: 11px;
+      margin: 12px 2px 0;
     }
   </style>
 </head>
 <body>
-  <h3>Enter Twitter Handle:</h3>
-  <input type="text" id="twitterHandle" placeholder="Enter Twitter handle">
-  <button id="deleteTweetsButton">Delete Tweets</button>
-  <button id="deleteTweetsWithRepliesButton">Delete Tweets + Replies</button>
-  <button id="deleteTweetsRepliesRepostsButton">Delete Tweets + Replies + Undo Reposts/Retweets</button>
+  <header class="header">
+    <p class="eyebrow">TweetRemover</p>
+    <h1>Clean up a profile</h1>
+    <p class="subtitle">Enter a handle, choose a mode, and X opens with the cleanup run armed.</p>
+  </header>
+
+  <main class="card">
+    <label for="twitterHandle">X / Twitter handle</label>
+    <div class="input-wrap">
+      <span class="at-sign">@</span>
+      <input type="text" id="twitterHandle" placeholder="AgentBlake" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="actions">
+      <button id="deleteTweetsButton" class="primary">
+        <span class="button-title">Delete posts</span>
+      </button>
+      <button id="deleteTweetsWithRepliesButton" class="secondary">
+        <span class="button-title">Delete posts + replies</span>
+        <span class="button-note">Includes the with_replies timeline.</span>
+      </button>
+      <button id="deleteTweetsRepliesRepostsButton" class="secondary">
+        <span class="button-title">Delete posts + replies + undo reposts</span>
+        <span class="button-note">Also undoes visible reposts/retweets by this handle.</span>
+      </button>
+    </div>
+  </main>
+
+  <p class="footnote">Uses X's own caret → Delete → confirmation flow. No API deletion.</p>
   <script src="popup.js"></script>
 </body>
 </html>

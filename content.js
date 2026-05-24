@@ -131,6 +131,24 @@
       && style.pointerEvents !== 'none';
   }
 
+  function isVisibleMenuSurface(menu) {
+    if (isElementVisible(menu)) return true;
+    if (!(menu instanceof HTMLElement)) return false;
+    if (!document.documentElement.contains(menu)) return false;
+    if (menu.hidden || menu.getAttribute('aria-hidden') === 'true' || menu.closest('[hidden], [aria-hidden="true"], [inert]')) return false;
+
+    const rect = menu.getBoundingClientRect();
+    const style = window.getComputedStyle(menu);
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    if (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none') return false;
+
+    // Current X can set opacity:0 on the menu container while its role=menuitem
+    // children are visible and clickable. Treat that as a visible menu surface
+    // only when at least one actionable child passes the stricter visibility
+    // check, so hidden/stale menus still stay ignored.
+    return [...menu.querySelectorAll('[role="menuitem"], button, [role="button"]')].some(isElementVisible);
+  }
+
   function normalizeText(text) {
     return (text || '').replace(/\s+/g, ' ').trim();
   }
@@ -419,7 +437,7 @@
   }
 
   function getVisibleMenus() {
-    const candidates = [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
+    const candidates = [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isVisibleMenuSurface);
     const unique = [];
 
     for (const candidate of candidates) {
@@ -627,37 +645,88 @@
       && Math.abs(current.height - snapshot.height) <= 2;
   }
 
+  function getControlAccessibleText(control) {
+    return normalizeText(
+      control.getAttribute?.('aria-label')
+      || control.getAttribute?.('title')
+      || control.innerText
+      || control.textContent
+      || '',
+    );
+  }
+
+  function isSafeDeletePostMenuText(text) {
+    if (!text) return false;
+    if (isSecurityOrAccountText(text)) return false;
+    if (/delete\s+(account|profile|message|conversation|chat|list|bookmark|draft|all)/i.test(text)) return false;
+    return /^Delete(\s+(post|tweet))?$/i.test(text);
+  }
+
+  function isPostCaretMenuText(text) {
+    if (isSecurityOrAccountText(text)) return false;
+    if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(text)) return false;
+    return /\bDelete\b/i.test(text)
+      && /\b(Edit|Pin to your profile|View post activity|Embed post|View post analytics|Request Community Note)\b/i.test(text);
+  }
+
+  function hasUnusableCompositedMenuRect(menu) {
+    const rect = menu.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    // Current X sometimes renders the post caret menu in a composited surface
+    // whose DOMRect is pinned to 0,0 even though the menu visibly opens from the
+    // caret. When this happens, ordinary anchor-distance checks are impossible;
+    // only use this as a fallback for a single newly-opened post menu with an
+    // exact Delete row.
+    return Math.abs(rect.left) <= 1 && Math.abs(rect.top) <= 1;
+  }
+
+  function getSafeDeletePostControl(menu) {
+    const controls = [...menu.querySelectorAll('[role="menuitem"], button, [role="button"]')]
+      .filter(isElementVisible)
+      .map((control) => {
+        const menuItem = control.closest?.('[role="menuitem"]');
+        return menuItem && menu.contains(menuItem) && isElementVisible(menuItem) ? menuItem : control;
+      })
+      .filter((control, index, all) => all.indexOf(control) === index);
+
+    return controls.find((control) => isSafeDeletePostMenuText(getControlAccessibleText(control))) || null;
+  }
+
   function getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots = []) {
     const candidates = getVisibleMenus()
-      .filter((menu) => isMenuAnchoredToCaret(menu, caret))
       .filter((menu) => !isUnchangedPreExistingMenu(menu, preExistingMenuSnapshots))
       .map((menu) => {
-        const menuText = normalizeText(menu.innerText || '');
-        if (isSecurityOrAccountText(menuText)) return null;
-        if (/chat|message|conversation|pin\s+(chat|conversation)|encrypted|keys/i.test(menuText)) return null;
+        const menuText = normalizeText(menu.innerText || menu.textContent || '');
+        if (!isPostCaretMenuText(menuText)) return null;
 
-        const menuItems = [...menu.querySelectorAll('[role="menuitem"]')].filter(isElementVisible);
-        const firstItem = menuItems[0] || null;
-        if (!firstItem) return null;
+        const deleteControl = getSafeDeletePostControl(menu);
+        if (!deleteControl) return null;
 
-        const firstText = normalizeText(firstItem.innerText || firstItem.textContent);
-        if (!/^Delete$/i.test(firstText)) return null;
+        const anchored = isMenuAnchoredToCaret(menu, caret);
+        const unusableRectFallback = !anchored && hasUnusableCompositedMenuRect(menu);
+        if (!anchored && !unusableRectFallback) return null;
 
         return {
           menu,
-          firstItem,
+          deleteControl,
+          anchored,
+          unusableRectFallback,
           distance: distanceBetweenRects(menu.getBoundingClientRect(), caret.getBoundingClientRect()),
         };
       })
       .filter(Boolean)
-      .sort((a, b) => a.distance - b.distance);
+      .sort((a, b) => Number(b.anchored) - Number(a.anchored) || a.distance - b.distance);
 
-    // X can leave multiple visible Delete menus during fast timeline cleanup.
-    // Pre-existing snapshots exclude unchanged old menus; if more than one new
-    // candidate remains, use the one physically closest to this post's caret.
-    // We still require it to be anchored to the caret and to have Delete as the
-    // first menu item, so we do not click unrelated menus.
-    return candidates[0]?.firstItem || null;
+    const anchoredCandidates = candidates.filter((candidate) => candidate.anchored);
+    if (anchoredCandidates.length > 0) return anchoredCandidates[0].deleteControl;
+
+    const fallbackCandidates = candidates.filter((candidate) => candidate.unusableRectFallback);
+    if (fallbackCandidates.length === 1) return fallbackCandidates[0].deleteControl;
+
+    // If the only usable menus have unusable 0,0 DOMRects, click only when
+    // there is exactly one newly-opened post-caret menu. Multiple unanchored
+    // fallback candidates are ambiguous, so refuse to click.
+    return null;
   }
 
   function getVisibleDeleteConfirmDialog() {
@@ -1257,6 +1326,7 @@
       shouldActivateFromUrl,
       dismissPreExistingMenus,
       getVisibleMenus,
+      getAnchoredDeleteMenuItem,
       getVisibleDeleteConfirmButton,
       state,
     });
