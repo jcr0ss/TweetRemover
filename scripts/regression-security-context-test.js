@@ -8,7 +8,7 @@ const vm = require('vm');
 
 class HTMLElement {}
 
-function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, isDocumentElement = false, visible = true } = {}) {
+function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, isDocumentElement = false, visible = true, children = [] } = {}) {
   const element = new HTMLElement();
   element.innerText = text;
   element.textContent = text;
@@ -19,7 +19,11 @@ function makeElement({ text = '', attrs = {}, closestMap = {}, isBody = false, i
   element.getAttribute = (name) => attrs[name] || null;
   element.setAttribute = (name, value) => { attrs[name] = String(value); };
   element.matches = (selector) => Boolean(closestMap[selector]);
-  element.querySelectorAll = () => [];
+  element.querySelectorAll = (selector) => {
+    if (selector === '[role="menuitem"]') return children.filter((child) => child.getAttribute?.('role') === 'menuitem');
+    return [];
+  };
+  element.contains = (candidate) => candidate === element || children.includes(candidate);
   element.dispatchEvent = () => true;
   element.appendChild = () => {};
   element.closest = (selectorList) => {
@@ -190,6 +194,20 @@ async function main() {
   const result = await window.__TweetRemoverTest.dismissPreExistingMenus('post caret', '12345');
   assert.strictEqual(result, true, 'hidden/stale role=menu elements must not block target caret processing');
   assert.strictEqual(record.windowDispatches, 0, 'hidden/stale menus should be ignored without recovery key events');
+}
+
+{
+  const menuItem = makeElement({ text: 'Delete', attrs: { role: 'menuitem' } });
+  const outerDropdown = makeElement({ text: 'Delete Edit Pin to your profile', attrs: { 'data-testid': 'Dropdown' }, children: [menuItem] });
+  const innerRoleMenu = makeElement({ text: 'Delete Edit Pin to your profile', attrs: { role: 'menu' }, children: [menuItem] });
+  outerDropdown.contains = (candidate) => candidate === outerDropdown || candidate === innerRoleMenu || candidate === menuItem;
+  innerRoleMenu.contains = (candidate) => candidate === innerRoleMenu || candidate === menuItem;
+  const { window } = loadTweetRemover({ search: '?TweetRemover=true', menus: [outerDropdown, innerRoleMenu] });
+  assert.strictEqual(
+    window.__TweetRemoverTest.getVisibleMenus().length,
+    1,
+    'nested X Dropdown/[role=menu] wrappers for the same visible menu must be counted once so target menu lookup can proceed',
+  );
 }
 
 console.log('regression-security-context-test: ok');

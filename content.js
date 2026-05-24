@@ -419,7 +419,40 @@
   }
 
   function getVisibleMenus() {
-    return [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
+    const candidates = [...document.querySelectorAll('[role="menu"], [data-testid="Dropdown"]')].filter(isElementVisible);
+    const unique = [];
+
+    for (const candidate of candidates) {
+      const candidateText = normalizeText(candidate.innerText || candidate.textContent || '');
+      const candidateRect = candidate.getBoundingClientRect();
+      const duplicateIndex = unique.findIndex((existing) => {
+        if (existing === candidate) return true;
+        const existingText = normalizeText(existing.innerText || existing.textContent || '');
+        const existingRect = existing.getBoundingClientRect();
+        const sameBox = Math.abs(existingRect.left - candidateRect.left) <= 2
+          && Math.abs(existingRect.top - candidateRect.top) <= 2
+          && Math.abs(existingRect.width - candidateRect.width) <= 2
+          && Math.abs(existingRect.height - candidateRect.height) <= 2;
+        const sameText = existingText === candidateText;
+        return sameText && (sameBox || existing.contains(candidate) || candidate.contains(existing));
+      });
+
+      if (duplicateIndex === -1) {
+        unique.push(candidate);
+        continue;
+      }
+
+      // X often renders the same visible menu as a nested [data-testid="Dropdown"]
+      // and [role="menu"]. Keep the element that actually owns menuitems so
+      // callers see one actionable menu instead of refusing to click because
+      // the same menu was counted twice.
+      const existing = unique[duplicateIndex];
+      const existingItems = existing.querySelectorAll?.('[role="menuitem"]').length || 0;
+      const candidateItems = candidate.querySelectorAll?.('[role="menuitem"]').length || 0;
+      if (candidateItems > existingItems) unique[duplicateIndex] = candidate;
+    }
+
+    return unique;
   }
 
   function dispatchEscape() {
@@ -1017,7 +1050,10 @@
       if (abortIfSecurityOrUnexpectedDialog()) return null;
       return getAnchoredDeleteMenuItem(caret, preExistingMenuSnapshots);
     }, `step 2 delete menu item for ${ownStatus.tweetId}`);
-    if (!deleteMenuItem || !state.running) return false;
+    if (!deleteMenuItem || !state.running) {
+      await tryDismissVisibleMenus();
+      return false;
+    }
 
     setStatus(`Step 2/3: selecting Delete for ${ownStatus.tweetId}.\n${getCountsText()}`);
     if (!clickDeleteMenuItem(deleteMenuItem)) return false;
@@ -1079,11 +1115,9 @@
         noteProceedingPastSafeUndoUi('undo repost', repostedStatus.tweetId);
       } else if (shouldPauseForRecentAllowedStaleUi('undo repost', repostedStatus.tweetId)) {
         return false;
-      }
-
-      if (!hasOnlySafeUndoOverlays()) {
-        abortRun('Aborted: a menu was already open before the undo repost step. Run flag removed to avoid clicking a menu not opened from the target post.');
-        return false;
+      } else {
+        if (!await dismissPreExistingMenus('undo repost', repostedStatus.tweetId)) return false;
+        preOpenedConfirmControl = getVisibleUndoRepostConfirm(undoButton);
       }
     }
 
@@ -1210,6 +1244,7 @@
       hasTweetRemoverParams,
       shouldActivateFromUrl,
       dismissPreExistingMenus,
+      getVisibleMenus,
       state,
     });
   }
